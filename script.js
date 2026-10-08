@@ -1,228 +1,185 @@
-/*
-    SONICCRYPT RECEIVER
-
-    Compatible with the current SONICCRYPT transmitter.
-
-    TRANSMITTER:
-
-        byte
-          ↓
-        8 bits
-          ↓
-        5 random bits + 8 data bits
-          ↓
-        13 bits
-          ↓
-        FSK
-          ↓
-        1200 Hz / 2200 Hz
-
-    RECEIVER:
-
-        microphone
-          ↓
-        audio samples
-          ↓
-        FSK detection
-          ↓
-        binary stream
-          ↓
-        remove 5 random bits
-          ↓
-        original bytes
-          ↓
-        image
-*/
-
-
-/* =========================================
-   DOM
-========================================= */
-
-const startButton =
-    document.getElementById(
-        "startButton"
-    );
-
-const stopButton =
-    document.getElementById(
-        "stopButton"
-    );
-
-const connectionStatus =
-    document.getElementById(
-        "connectionStatus"
-    );
-
-const receiverState =
-    document.getElementById(
-        "receiverState"
-    );
-
-const signalText =
-    document.getElementById(
-        "signalText"
-    );
-
-const signalBar =
-    document.getElementById(
-        "signalBar"
-    );
-
-const signalPercent =
-    document.getElementById(
-        "signalPercent"
-    );
-
-const frequencyDisplay =
-    document.getElementById(
-        "frequency"
-    );
-
-const currentBit =
-    document.getElementById(
-        "currentBit"
-    );
-
-const bitsReceived =
-    document.getElementById(
-        "bitsReceived"
-    );
-
-const decodeStatus =
-    document.getElementById(
-        "decodeStatus"
-    );
-
-const decoderLog =
-    document.getElementById(
-        "decoderLog"
-    );
-
-const result =
-    document.getElementById(
-        "result"
-    );
-
-const receivedImage =
-    document.getElementById(
-        "receivedImage"
-    );
-
-const resultType =
-    document.getElementById(
-        "resultType"
-    );
-
-const resultSize =
-    document.getElementById(
-        "resultSize"
-    );
-
-
-
-/* =========================================
-   SONICCRYPT SETTINGS
-========================================= */
-
-const FREQUENCY_0 = 1200;
-
-const FREQUENCY_1 = 2200;
+const SAMPLE_RATE = 44100;
 
 /*
-    Must match the transmitter.
-*/
+ * MUST MATCH THE TRANSMITTER
+ */
 
-const BIT_DURATION = 0.025;
+const FREQUENCIES = Array.from(
+    { length: 16 },
+    (_, i) => 1000 + i * 200
+);
+
+const SYMBOL_DURATIONS = {
+    turbo: 0.003,
+    reliable: 0.006
+};
+
+const SYMBOL_DURATION =
+    SYMBOL_DURATIONS.turbo;
 
 
 /*
-    How sensitive the signal detector is.
-*/
-
-const SIGNAL_THRESHOLD = 0.008;
-
-
-
-/* =========================================
-   AUDIO STATE
-========================================= */
+ * AUDIO
+ */
 
 let audioContext = null;
-
-let microphoneStream = null;
-
-let microphoneSource = null;
-
+let microphone = null;
 let processor = null;
+let silentGain = null;
 
-let recordedSamples = [];
+let sampleBuffer = [];
 
-let isListening = false;
+let listening = false;
 
 
+/*
+ * DECODER STATE
+ */
 
-/* =========================================
-   START LISTENING
-========================================= */
+let symbolBuffer = [];
 
-startButton.addEventListener(
-    "click",
-    startListening
-);
+let detectedHeader = false;
+
+let expectedFileSize = 0;
+let expectedCRC = 0;
+
+let fileName = "";
+let mimeType = "";
+
+let payloadBits = [];
+
+let receivedBytes = [];
+
+let receiveStartTime = 0;
+
+let lastPreviewUpdate = 0;
+
+
+/*
+ * ELEMENTS
+ */
+
+const startButton =
+    document.getElementById("startButton");
+
+const stopButton =
+    document.getElementById("stopButton");
+
+const statusElement =
+    document.getElementById("status");
+
+const signalStrength =
+    document.getElementById("signalStrength");
+
+const signalFill =
+    document.getElementById("signalFill");
+
+const frequencyElement =
+    document.getElementById("frequency");
+
+const symbolsReceived =
+    document.getElementById("symbolsReceived");
+
+const fileNameElement =
+    document.getElementById("fileName");
+
+const receivedText =
+    document.getElementById("receivedText");
+
+const receivePercent =
+    document.getElementById("receivePercent");
+
+const receiveFill =
+    document.getElementById("receiveFill");
+
+const receivedBytesElement =
+    document.getElementById("receivedBytes");
+
+const expectedBytesElement =
+    document.getElementById("expectedBytes");
+
+const receiveSpeed =
+    document.getElementById("receiveSpeed");
+
+const receivedImage =
+    document.getElementById("receivedImage");
+
+const previewStatus =
+    document.getElementById("previewStatus");
+
+const downloadButton =
+    document.getElementById("downloadButton");
+
+const logElement =
+    document.getElementById("log");
+
+
+/*
+ * LOG
+ */
+
+function log(message) {
+
+    const entry =
+        document.createElement("div");
+
+    entry.className =
+        "log-entry";
+
+    entry.innerHTML =
+        `<span class="log-time">[${new Date().toLocaleTimeString()}]</span> ${message}`;
+
+    logElement.appendChild(entry);
+
+    logElement.scrollTop =
+        logElement.scrollHeight;
+}
+
+
+/*
+ * START
+ */
+
+startButton.onclick =
+    startListening;
 
 
 async function startListening() {
 
+    if (listening) {
+        return;
+    }
+
     try {
 
-        /*
-            Request microphone permission.
-        */
-
-        microphoneStream =
+        const stream =
             await navigator.mediaDevices
                 .getUserMedia({
                     audio: {
                         channelCount: 1,
-
                         echoCancellation: false,
-
                         noiseSuppression: false,
-
                         autoGainControl: false
                     }
                 });
 
-
-        /*
-            Create audio context.
-        */
-
         audioContext =
-            new (
-                window.AudioContext ||
-                window.webkitAudioContext
-            )();
-
+            new AudioContext({
+                sampleRate: SAMPLE_RATE
+            });
 
         await audioContext.resume();
 
-
-        /*
-            Connect microphone.
-        */
-
-        microphoneSource =
+        microphone =
             audioContext.createMediaStreamSource(
-                microphoneStream
+                stream
             );
 
-
         /*
-            ScriptProcessorNode allows us
-            to collect raw audio samples.
-        */
+         * ScriptProcessor is used here because it
+         * works directly in a normal GitHub Pages
+         * project without another JS file.
+         */
 
         processor =
             audioContext.createScriptProcessor(
@@ -231,1162 +188,1031 @@ async function startListening() {
                 1
             );
 
-
-        processor.onaudioprocess =
-            handleAudio;
-
-
-        microphoneSource.connect(
-            processor
-        );
-
-
         /*
-            We do NOT connect the microphone
-            to the speakers.
+         * Prevent microphone audio from being
+         * played back through the speakers.
+         */
 
-            This prevents feedback.
-        */
+        silentGain =
+            audioContext.createGain();
 
-        processor.connect(
+        silentGain.gain.value = 0;
+
+        microphone.connect(processor);
+
+        processor.connect(silentGain);
+
+        silentGain.connect(
             audioContext.destination
         );
 
+        processor.onaudioprocess =
+            processAudio;
 
-        recordedSamples = [];
+        listening = true;
 
-        isListening = true;
+        resetDecoder();
 
+        receiveStartTime =
+            performance.now();
+
+        statusElement.textContent =
+            "LISTENING";
 
         startButton.disabled = true;
-
         stopButton.disabled = false;
 
+        log("Microphone activated.");
+        log("Waiting for SONICCRYPT sync signal...");
 
-        connectionStatus.classList.add(
-            "active"
-        );
-
-        connectionStatus.innerHTML =
-            "<span></span> MICROPHONE ACTIVE";
-
-
-        receiverState.textContent =
-            "LISTENING";
-
-        decodeStatus.textContent =
-            "CAPTURING";
-
-        signalText.textContent =
-            "LISTENING";
-
-
-        writeLog(
-            "Microphone initialized.\n" +
-            "Waiting for SONICCRYPT signal..."
-        );
-
-
-    }
-    catch (error) {
+    } catch (error) {
 
         console.error(error);
 
-        alert(
-            "Microphone access was denied or unavailable."
-        );
+        statusElement.textContent =
+            "MICROPHONE ERROR";
 
+        log(
+            "Microphone error: " +
+            error.message
+        );
     }
 }
 
 
+/*
+ * STOP
+ */
 
-/* =========================================
-   CAPTURE AUDIO
-========================================= */
+stopButton.onclick =
+    stopListening;
 
-function handleAudio(event) {
 
-    if (!isListening) {
-        return;
+function stopListening() {
+
+    listening = false;
+
+    if (processor) {
+        processor.disconnect();
+        processor = null;
     }
 
+    if (microphone) {
+        microphone.disconnect();
+        microphone = null;
+    }
+
+    if (silentGain) {
+        silentGain.disconnect();
+        silentGain = null;
+    }
+
+    if (audioContext) {
+
+        audioContext.close();
+
+        audioContext = null;
+    }
+
+    statusElement.textContent =
+        "MICROPHONE OFF";
+
+    startButton.disabled = false;
+    stopButton.disabled = true;
+
+    log("Receiver stopped.");
+}
+
+
+/*
+ * AUDIO PROCESSING
+ */
+
+function processAudio(event) {
+
+    if (!listening) {
+        return;
+    }
 
     const input =
         event.inputBuffer
             .getChannelData(0);
 
-
     /*
-        Copy the samples.
-
-        The browser reuses the original
-        AudioBuffer, so we MUST copy them.
-    */
-
-    const copy =
-        new Float32Array(
-            input.length
-        );
-
-    copy.set(input);
-
-    recordedSamples.push(copy);
-
-
-    /*
-        Calculate live signal level.
-    */
-
-    let sum = 0;
+     * Copy microphone samples.
+     */
 
     for (let i = 0; i < input.length; i++) {
 
-        sum +=
-            input[i] *
-            input[i];
+        sampleBuffer.push(input[i]);
     }
 
+    /*
+     * Process one symbol at a time.
+     */
 
-    const rms =
-        Math.sqrt(
-            sum / input.length
+    const samplesPerSymbol =
+        Math.floor(
+            SAMPLE_RATE *
+            SYMBOL_DURATION
         );
 
+    while (
+        sampleBuffer.length >=
+        samplesPerSymbol
+    ) {
 
-    const percent =
+        const samples =
+            sampleBuffer.splice(
+                0,
+                samplesPerSymbol
+            );
+
+        const result =
+            detectFrequency(samples);
+
+        if (result) {
+
+            symbolBuffer.push(
+                result.symbol
+            );
+
+            frequencyElement.textContent =
+                `${result.frequency} Hz`;
+
+            updateSignal(
+                result.strength
+            );
+
+            decodeSymbols();
+        }
+    }
+}
+
+
+/*
+ * 16-FSK DETECTOR
+ */
+
+function detectFrequency(samples) {
+
+    let bestSymbol = -1;
+    let bestPower = 0;
+
+    /*
+     * Goertzel-style frequency measurement.
+     */
+
+    for (
+        let symbol = 0;
+        symbol < FREQUENCIES.length;
+        symbol++
+    ) {
+
+        const frequency =
+            FREQUENCIES[symbol];
+
+        const power =
+            goertzel(
+                samples,
+                frequency,
+                SAMPLE_RATE
+            );
+
+        if (power > bestPower) {
+
+            bestPower = power;
+            bestSymbol = symbol;
+        }
+    }
+
+    const strength =
         Math.min(
             100,
-            Math.round(
-                rms * 1000
-            )
+            bestPower * 100000
         );
 
-
-    signalBar.style.width =
-        percent + "%";
-
-    signalPercent.textContent =
-        percent + "%";
-
-
-    if (
-        rms >
-        SIGNAL_THRESHOLD
-    ) {
-
-        signalText.textContent =
-            "SIGNAL";
-
-        receiverState.textContent =
-            "SIGNAL DETECTED";
-
+    if (bestSymbol < 0) {
+        return null;
     }
+
+    return {
+        symbol: bestSymbol,
+        frequency:
+            FREQUENCIES[bestSymbol],
+        strength
+    };
 }
 
 
-
-/* =========================================
-   STOP LISTENING
-========================================= */
-
-stopButton.addEventListener(
-    "click",
-    stopListening
-);
-
-
-async function stopListening() {
-
-    if (!isListening) {
-        return;
-    }
-
-
-    isListening = false;
-
-
-    startButton.disabled = false;
-
-    stopButton.disabled = true;
-
-
-    receiverState.textContent =
-        "PROCESSING";
-
-    decodeStatus.textContent =
-        "DECODING";
-
-    signalText.textContent =
-        "PROCESSING";
-
-
-    /*
-        Stop microphone.
-    */
-
-    if (processor) {
-
-        processor.disconnect();
-
-        processor.onaudioprocess =
-            null;
-    }
-
-
-    if (microphoneSource) {
-
-        microphoneSource.disconnect();
-    }
-
-
-    if (microphoneStream) {
-
-        microphoneStream
-            .getTracks()
-            .forEach(
-                track => track.stop()
-            );
-    }
-
-
-    connectionStatus.classList.remove(
-        "active"
-    );
-
-    connectionStatus.innerHTML =
-        "<span></span> MICROPHONE OFF";
-
-
-    /*
-        Combine all captured chunks.
-    */
-
-    const audio =
-        combineSamples(
-            recordedSamples
-        );
-
-
-    writeLog(
-        "Capture complete.\n" +
-        "Samples: " +
-        audio.length +
-        "\n" +
-        "Sample rate: " +
-        audioContext.sampleRate +
-        "\n\n" +
-        "Searching for SONICCRYPT signal..."
-    );
-
-
-    /*
-        Decode.
-    */
-
-    try {
-
-        const decoded =
-            decodeTransmission(
-                audio,
-                audioContext.sampleRate
-            );
-
-
-        if (!decoded) {
-
-            throw new Error(
-                "No valid image transmission found."
-            );
-        }
-
-
-        displayResult(decoded);
-
-
-    }
-    catch (error) {
-
-        console.error(error);
-
-        receiverState.textContent =
-            "FAILED";
-
-        decodeStatus.textContent =
-            "NO DATA";
-
-        signalText.textContent =
-            "FAILED";
-
-
-        writeLog(
-            "DECODING FAILED\n\n" +
-            error.message +
-            "\n\n" +
-            "Make sure the transmitting speaker is\n" +
-            "close enough to the microphone and\n" +
-            "the volume is high enough."
-        );
-
-    }
-}
-
-
-
-/* =========================================
-   COMBINE AUDIO CHUNKS
-========================================= */
-
-function combineSamples(chunks) {
-
-    let totalLength = 0;
-
-
-    for (const chunk of chunks) {
-
-        totalLength +=
-            chunk.length;
-    }
-
-
-    const combined =
-        new Float32Array(
-            totalLength
-        );
-
-
-    let offset = 0;
-
-
-    for (const chunk of chunks) {
-
-        combined.set(
-            chunk,
-            offset
-        );
-
-        offset +=
-            chunk.length;
-    }
-
-
-    return combined;
-}
-
-
-
-/* =========================================
-   MAIN DECODER
-========================================= */
-
-function decodeTransmission(
-    samples,
-    sampleRate
-) {
-
-    /*
-        Remove silence surrounding
-        the transmission.
-    */
-
-    const trimmed =
-        trimSilence(samples);
-
-
-    if (trimmed.length < 1000) {
-
-        throw new Error(
-            "Audio signal was too short."
-        );
-    }
-
-
-    const samplesPerBit =
-        Math.round(
-            sampleRate *
-            BIT_DURATION
-        );
-
-
-    writeLog(
-        "Signal found.\n" +
-        "Analyzing FSK data...\n" +
-        "Samples per bit: " +
-        samplesPerBit
-    );
-
-
-    /*
-        Try several starting offsets.
-
-        The microphone does not necessarily
-        begin capturing exactly on a bit
-        boundary.
-    */
-
-    const maximumOffset =
-        Math.min(
-            samplesPerBit,
-            300
-        );
-
-
-    let bestResult = null;
-
-
-    for (
-        let offset = 0;
-        offset < maximumOffset;
-        offset += 4
-    ) {
-
-        const bits =
-            demodulateFSK(
-                trimmed,
-                sampleRate,
-                samplesPerBit,
-                offset
-            );
-
-
-        if (
-            bits.length <
-            13 * 10
-        ) {
-
-            continue;
-        }
-
-
-        /*
-            Try all 13 possible positions.
-
-            One of these should correspond
-            to the start of:
-
-                [5 random][8 data]
-        */
-
-        for (
-            let alignment = 0;
-            alignment < 13;
-            alignment++
-        ) {
-
-            const bytes =
-                removePadding(
-                    bits,
-                    alignment
-                );
-
-
-            const detected =
-                detectImage(
-                    bytes
-                );
-
-
-            if (detected) {
-
-                bestResult =
-                    detected;
-
-                break;
-            }
-        }
-
-
-        if (bestResult) {
-            break;
-        }
-    }
-
-
-    if (!bestResult) {
-
-        throw new Error(
-            "Could not identify a valid image."
-        );
-    }
-
-
-    return bestResult;
-}
-
-
-
-/* =========================================
-   TRIM SILENCE
-========================================= */
-
-function trimSilence(samples) {
-
-    const windowSize = 400;
-
-    let start = 0;
-
-    let end =
-        samples.length - 1;
-
-
-    /*
-        Find beginning.
-    */
-
-    for (
-        let i = 0;
-        i < samples.length - windowSize;
-        i += windowSize
-    ) {
-
-        let energy = 0;
-
-        for (
-            let j = 0;
-            j < windowSize;
-            j++
-        ) {
-
-            energy +=
-                samples[i + j] *
-                samples[i + j];
-        }
-
-
-        const rms =
-            Math.sqrt(
-                energy / windowSize
-            );
-
-
-        if (
-            rms >
-            SIGNAL_THRESHOLD
-        ) {
-
-            start = i;
-
-            break;
-        }
-    }
-
-
-    /*
-        Find end.
-    */
-
-    for (
-        let i = samples.length - windowSize;
-        i > 0;
-        i -= windowSize
-    ) {
-
-        let energy = 0;
-
-        for (
-            let j = 0;
-            j < windowSize;
-            j++
-        ) {
-
-            energy +=
-                samples[i + j] *
-                samples[i + j];
-        }
-
-
-        const rms =
-            Math.sqrt(
-                energy / windowSize
-            );
-
-
-        if (
-            rms >
-            SIGNAL_THRESHOLD
-        ) {
-
-            end =
-                Math.min(
-                    samples.length,
-                    i + windowSize
-                );
-
-            break;
-        }
-    }
-
-
-    return samples.slice(
-        start,
-        end
-    );
-}
-
-
-
-/* =========================================
-   FSK DEMODULATION
-========================================= */
-
-function demodulateFSK(
-    samples,
-    sampleRate,
-    samplesPerBit,
-    offset
-) {
-
-    const bits = [];
-
-
-    for (
-        let position = offset;
-
-        position +
-        samplesPerBit <=
-        samples.length;
-
-        position +=
-            samplesPerBit
-    ) {
-
-        const bitSamples =
-            samples.slice(
-                position,
-                position +
-                samplesPerBit
-            );
-
-
-        const power0 =
-            goertzel(
-                bitSamples,
-                sampleRate,
-                FREQUENCY_0
-            );
-
-
-        const power1 =
-            goertzel(
-                bitSamples,
-                sampleRate,
-                FREQUENCY_1
-            );
-
-
-        const total =
-            power0 +
-            power1;
-
-
-        /*
-            Ignore extremely weak
-            signal sections.
-        */
-
-        if (total < 0.000001) {
-
-            bits.push(0);
-
-            continue;
-        }
-
-
-        const bit =
-            power1 > power0
-                ? 1
-                : 0;
-
-
-        bits.push(bit);
-
-
-        currentBit.textContent =
-            bit;
-
-        bitsReceived.textContent =
-            bits.length;
-
-
-        frequencyDisplay.textContent =
-            bit === 1
-                ? FREQUENCY_1 + " Hz"
-                : FREQUENCY_0 + " Hz";
-    }
-
-
-    return bits;
-}
-
-
-
-/* =========================================
-   GOERTZEL FREQUENCY DETECTOR
-========================================= */
+/*
+ * GOERTZEL
+ */
 
 function goertzel(
     samples,
-    sampleRate,
-    targetFrequency
+    frequency,
+    sampleRate
 ) {
 
     const k =
         Math.round(
+            0.5 +
             (
                 samples.length *
-                targetFrequency
-            ) /
-            sampleRate
+                frequency /
+                sampleRate
+            )
         );
 
-
     const omega =
-        (
-            2 *
-            Math.PI *
-            k
-        ) /
+        2 *
+        Math.PI *
+        k /
         samples.length;
-
 
     const cosine =
         Math.cos(omega);
 
+    const sine =
+        Math.sin(omega);
+
     const coefficient =
         2 * cosine;
 
-
     let q0 = 0;
-
     let q1 = 0;
-
     let q2 = 0;
 
-
-    for (
-        let i = 0;
-        i < samples.length;
-        i++
-    ) {
+    for (const sample of samples) {
 
         q0 =
-            coefficient *
-            q1 -
+            coefficient * q1 -
             q2 +
-            samples[i];
+            sample;
 
         q2 = q1;
-
         q1 = q0;
     }
 
+    const real =
+        q1 -
+        q2 * cosine;
+
+    const imag =
+        q2 * sine;
 
     return (
-        q1 * q1 +
-        q2 * q2 -
-        coefficient *
-        q1 *
-        q2
+        real * real +
+        imag * imag
     );
 }
 
 
+/*
+ * SIGNAL UI
+ */
 
-/* =========================================
-   REMOVE 5-BIT RANDOM PADDING
-========================================= */
+function updateSignal(value) {
 
-function removePadding(
-    bits,
-    alignment
-) {
+    const rounded =
+        Math.round(value);
+
+    signalStrength.textContent =
+        `${rounded}%`;
+
+    signalFill.style.width =
+        `${rounded}%`;
+}
+
+
+/*
+ * SYMBOL DECODER
+ *
+ * We first look for the magic:
+ *
+ * SCX1
+ */
+
+function decodeSymbols() {
+
+    symbolsReceived.textContent =
+        symbolBuffer.length.toLocaleString();
+
+    /*
+     * Need at least 8 symbols for 4 bytes.
+     */
+
+    if (!detectedHeader) {
+
+        if (
+            findMagicSequence()
+        ) {
+
+            detectedHeader = true;
+
+            parseHeader();
+
+        } else {
+
+            /*
+             * Don't allow unlimited memory growth.
+             */
+
+            if (symbolBuffer.length > 2000) {
+
+                symbolBuffer =
+                    symbolBuffer.slice(-500);
+            }
+        }
+
+        return;
+    }
+
+    /*
+     * Header has told us where payload begins.
+     */
+
+    decodePayload();
+}
+
+
+/*
+ * MAGIC SEARCH
+ */
+
+function findMagicSequence() {
+
+    const magic =
+        [5, 3, 8, 1];
+
+    for (
+        let i = 0;
+        i <= symbolBuffer.length - magic.length;
+        i++
+    ) {
+
+        let match = true;
+
+        for (let j = 0; j < magic.length; j++) {
+
+            if (
+                symbolBuffer[i + j] !==
+                magic[j]
+            ) {
+
+                match = false;
+                break;
+            }
+        }
+
+        if (match) {
+
+            /*
+             * Keep only data from MAGIC onward.
+             */
+
+            symbolBuffer =
+                symbolBuffer.slice(i);
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+/*
+ * HEADER FORMAT
+ *
+ * 4 magic bytes
+ * 1 version
+ * 2 name length
+ * name
+ * 2 MIME length
+ * MIME
+ * 4 file size
+ * 4 CRC32
+ */
+
+function parseHeader() {
+
+    const bytes =
+        symbolsToBytes(symbolBuffer);
+
+    if (bytes.length < 7) {
+        return;
+    }
+
+    if (
+        bytes[0] !== 0x53 ||
+        bytes[1] !== 0x43 ||
+        bytes[2] !== 0x58 ||
+        bytes[3] !== 0x31
+    ) {
+
+        detectedHeader = false;
+        return;
+    }
+
+    const version =
+        bytes[4];
+
+    if (version !== 1) {
+
+        log("Unsupported SONICCRYPT version.");
+
+        detectedHeader = false;
+
+        return;
+    }
+
+    let position = 5;
+
+    if (bytes.length < position + 2) {
+        return;
+    }
+
+    const nameLength =
+        (bytes[position] << 8) |
+        bytes[position + 1];
+
+    position += 2;
+
+    if (
+        bytes.length <
+        position + nameLength + 2
+    ) {
+        return;
+    }
+
+    fileName =
+        new TextDecoder().decode(
+            new Uint8Array(
+                bytes.slice(
+                    position,
+                    position + nameLength
+                )
+            )
+        );
+
+    position += nameLength;
+
+    const mimeLength =
+        (bytes[position] << 8) |
+        bytes[position + 1];
+
+    position += 2;
+
+    if (
+        bytes.length <
+        position + mimeLength + 8
+    ) {
+        return;
+    }
+
+    mimeType =
+        new TextDecoder().decode(
+            new Uint8Array(
+                bytes.slice(
+                    position,
+                    position + mimeLength
+                )
+            )
+        );
+
+    position += mimeLength;
+
+    expectedFileSize =
+        (
+            bytes[position] * 0x1000000 +
+            bytes[position + 1] * 0x10000 +
+            bytes[position + 2] * 0x100 +
+            bytes[position + 3]
+        ) >>> 0;
+
+    position += 4;
+
+    expectedCRC =
+        (
+            bytes[position] * 0x1000000 +
+            bytes[position + 1] * 0x10000 +
+            bytes[position + 2] * 0x100 +
+            bytes[position + 3]
+        ) >>> 0;
+
+    /*
+     * Remove header symbols.
+     */
+
+    const headerBytes =
+        position;
+
+    const headerSymbols =
+        headerBytes * 2;
+
+    symbolBuffer =
+        symbolBuffer.slice(
+            headerSymbols
+        );
+
+    fileNameElement.textContent =
+        fileName;
+
+    expectedBytesElement.textContent =
+        formatBytes(expectedFileSize);
+
+    previewStatus.textContent =
+        "Receiving...";
+
+    log(
+        `SONICCRYPT transmission detected: ${fileName}`
+    );
+
+    log(
+        `Expected size: ${formatBytes(expectedFileSize)}`
+    );
+
+    log(
+        `MIME type: ${mimeType}`
+    );
+
+    log(
+        `CRC32: ${expectedCRC.toString(16).padStart(8, "0")}`
+    );
+}
+
+
+/*
+ * SYMBOLS -> BYTES
+ */
+
+function symbolsToBytes(symbols) {
 
     const bytes = [];
 
-
-    /*
-        Protocol:
-
-        5 random bits
-        +
-        8 actual data bits
-
-        = 13 bits
-    */
-
-
     for (
-        let position =
-            alignment;
-
-        position + 13 <=
-        bits.length;
-
-        position += 13
+        let i = 0;
+        i + 1 < symbols.length;
+        i += 2
     ) {
 
+        bytes.push(
+            (
+                symbols[i] << 4
+            ) |
+            symbols[i + 1]
+        );
+    }
+
+    return bytes;
+}
+
+
+/*
+ * PAYLOAD
+ *
+ * Every original byte is:
+ *
+ * 5 random bits
+ * 8 data bits
+ *
+ * = 13 bits
+ */
+
+function decodePayload() {
+
+    /*
+     * Convert incoming symbols into bits.
+     */
+
+    const bits = [];
+
+    for (const symbol of symbolBuffer) {
+
+        bits.push(
+            (symbol >> 3) & 1,
+            (symbol >> 2) & 1,
+            (symbol >> 1) & 1,
+            symbol & 1
+        );
+    }
+
+    /*
+     * We need complete 13-bit blocks.
+     */
+
+    while (bits.length >= 13) {
+
         /*
-            Skip random 5 bits.
-        */
-
-        const dataStart =
-            position + 5;
-
+         * Ignore the first five random bits.
+         */
 
         let value = 0;
 
-
-        /*
-            Read 8 real data bits.
-        */
-
-        for (
-            let i = 0;
-            i < 8;
-            i++
-        ) {
+        for (let i = 5; i < 13; i++) {
 
             value =
-                (
-                    value << 1
-                ) |
-                bits[
-                    dataStart + i
-                ];
+                (value << 1) |
+                bits[i];
         }
 
+        receivedBytes.push(value);
 
-        bytes.push(value);
+        bits.splice(0, 13);
+
+        /*
+         * We only need enough bytes for
+         * the actual file.
+         */
+
+        if (
+            receivedBytes.length >=
+            expectedFileSize
+        ) {
+
+            finishReception();
+
+            return;
+        }
     }
 
+    /*
+     * Keep incomplete bits.
+     *
+     * Convert remaining bits back into
+     * symbol form for the next pass.
+     */
 
-    return new Uint8Array(bytes);
+    symbolBuffer =
+        bitsToSymbols(bits);
+
+    updateReceiveProgress();
+
+    updateLivePreview();
 }
 
 
+/*
+ * BITS -> SYMBOLS
+ */
 
-/* =========================================
-   IMAGE DETECTION
-========================================= */
+function bitsToSymbols(bits) {
 
-function detectImage(bytes) {
+    const symbols = [];
 
-    /*
-        PNG
-    */
-
-    if (
-        bytes.length >= 8 &&
-        bytes[0] === 0x89 &&
-        bytes[1] === 0x50 &&
-        bytes[2] === 0x4E &&
-        bytes[3] === 0x47 &&
-        bytes[4] === 0x0D &&
-        bytes[5] === 0x0A &&
-        bytes[6] === 0x1A &&
-        bytes[7] === 0x0A
+    for (
+        let i = 0;
+        i < bits.length;
+        i += 4
     ) {
 
-        const end =
-            findPNGEnd(bytes);
+        let value = 0;
 
+        for (
+            let j = 0;
+            j < 4;
+            j++
+        ) {
 
-        return {
+            value <<= 1;
 
-            bytes:
-                bytes.slice(
-                    0,
-                    end
-                ),
+            if (
+                i + j <
+                bits.length
+            ) {
 
-            type:
-                "image/png",
+                value |=
+                    bits[i + j];
+            }
+        }
 
-            name:
-                "soniccrypt.png"
-        };
+        symbols.push(value);
     }
 
-
-    /*
-        JPEG
-    */
-
-    if (
-        bytes.length >= 3 &&
-        bytes[0] === 0xFF &&
-        bytes[1] === 0xD8 &&
-        bytes[2] === 0xFF
-    ) {
-
-        const end =
-            findJPEGEnd(bytes);
+    return symbols;
+}
 
 
-        return {
+/*
+ * LIVE PROGRESS
+ */
 
-            bytes:
-                bytes.slice(
-                    0,
-                    end
-                ),
+function updateReceiveProgress() {
 
-            type:
-                "image/jpeg",
-
-            name:
-                "soniccrypt.jpg"
-        };
+    if (!expectedFileSize) {
+        return;
     }
 
+    const count =
+        Math.min(
+            receivedBytes.length,
+            expectedFileSize
+        );
 
-    /*
-        GIF
-    */
-
-    if (
-        bytes.length >= 6 &&
-
-        bytes[0] === 0x47 &&
-        bytes[1] === 0x49 &&
-        bytes[2] === 0x46 &&
-
+    const percent =
         (
-            bytes[3] === 0x38
-        )
-    ) {
+            count /
+            expectedFileSize
+        ) * 100;
 
-        const end =
-            findGIFEnd(bytes);
+    receiveFill.style.width =
+        `${percent}%`;
+
+    receivePercent.textContent =
+        `${percent.toFixed(1)}%`;
+
+    receivedBytesElement.textContent =
+        formatBytes(count);
+
+    receivedText.textContent =
+        `${formatBytes(count)} / ${formatBytes(expectedFileSize)}`;
+
+    const elapsed =
+        (
+            performance.now() -
+            receiveStartTime
+        ) / 1000;
+
+    const speed =
+        elapsed > 0
+            ? count / elapsed
+            : 0;
+
+    receiveSpeed.textContent =
+        `${formatBytes(speed)}/s`;
+}
 
 
-        return {
+/*
+ * LIVE IMAGE
+ *
+ * Browsers normally require a complete valid
+ * image before displaying JPEG/PNG.
+ *
+ * We still attempt a preview periodically.
+ */
 
-            bytes:
-                bytes.slice(
-                    0,
-                    end
-                ),
+function updateLivePreview() {
 
-            type:
-                "image/gif",
-
-            name:
-                "soniccrypt.gif"
-        };
-    }
-
-
-    /*
-        WEBP
-
-        RIFF....WEBP
-    */
+    const now =
+        performance.now();
 
     if (
-        bytes.length >= 12 &&
-
-        bytes[0] === 0x52 &&
-        bytes[1] === 0x49 &&
-        bytes[2] === 0x46 &&
-        bytes[3] === 0x46 &&
-
-        bytes[8] === 0x57 &&
-        bytes[9] === 0x45 &&
-        bytes[10] === 0x42 &&
-        bytes[11] === 0x50
+        now -
+        lastPreviewUpdate <
+        500
     ) {
 
-        return {
-
-            bytes,
-
-            type:
-                "image/webp",
-
-            name:
-                "soniccrypt.webp"
-        };
+        return;
     }
 
+    lastPreviewUpdate = now;
 
-    return null;
+    if (
+        !mimeType.startsWith("image/")
+    ) {
+
+        previewStatus.textContent =
+            `${formatBytes(receivedBytes.length)} received`;
+
+        return;
+    }
+
+    try {
+
+        const blob =
+            new Blob(
+                [
+                    new Uint8Array(
+                        receivedBytes
+                    )
+                ],
+                {
+                    type: mimeType
+                }
+            );
+
+        const url =
+            URL.createObjectURL(blob);
+
+        const testImage =
+            new Image();
+
+        testImage.onload = () => {
+
+            receivedImage.src =
+                url;
+
+            receivedImage.style.display =
+                "block";
+
+            previewStatus.textContent =
+                "LIVE IMAGE PREVIEW";
+
+        };
+
+        testImage.onerror = () => {
+
+            URL.revokeObjectURL(url);
+        };
+
+        testImage.src = url;
+
+    } catch {
+
+        // Continue receiving.
+    }
 }
 
 
+/*
+ * FINISH
+ */
 
-/* =========================================
-   PNG END
-========================================= */
+function finishReception() {
 
-function findPNGEnd(bytes) {
+    const data =
+        new Uint8Array(
+            receivedBytes
+        );
+
+    const actualCRC =
+        crc32(data);
+
+    updateReceiveProgress();
+
+    if (
+        actualCRC !== expectedCRC
+    ) {
+
+        statusElement.textContent =
+            "CHECKSUM ERROR";
+
+        previewStatus.textContent =
+            "Transmission completed, but the checksum failed.";
+
+        log(
+            `CRC ERROR. Expected ${expectedCRC.toString(16)}, got ${actualCRC.toString(16)}`
+        );
+
+        return;
+    }
+
+    statusElement.textContent =
+        "TRANSMISSION COMPLETE";
+
+    receiveFill.style.width = "100%";
+    receivePercent.textContent = "100%";
+
+    previewStatus.textContent =
+        "FILE RECEIVED SUCCESSFULLY";
+
+    log("Transmission complete.");
+    log("CRC32 verified successfully.");
 
     /*
-        PNG ends with:
-
-        49 45 4E 44
-        CRC
-    */
-
-    for (
-        let i = 8;
-        i < bytes.length - 8;
-        i++
-    ) {
-
-        if (
-            bytes[i] === 0x49 &&
-            bytes[i + 1] === 0x45 &&
-            bytes[i + 2] === 0x4E &&
-            bytes[i + 3] === 0x44
-        ) {
-
-            return Math.min(
-                bytes.length,
-                i + 12
-            );
-        }
-    }
-
-
-    return bytes.length;
-}
-
-
-
-/* =========================================
-   JPEG END
-========================================= */
-
-function findJPEGEnd(bytes) {
-
-    for (
-        let i = 2;
-        i < bytes.length - 1;
-        i++
-    ) {
-
-        if (
-            bytes[i] === 0xFF &&
-            bytes[i + 1] === 0xD9
-        ) {
-
-            return i + 2;
-        }
-    }
-
-
-    return bytes.length;
-}
-
-
-
-/* =========================================
-   GIF END
-========================================= */
-
-function findGIFEnd(bytes) {
-
-    for (
-        let i = 6;
-        i < bytes.length;
-        i++
-    ) {
-
-        if (
-            bytes[i] === 0x3B
-        ) {
-
-            return i + 1;
-        }
-    }
-
-
-    return bytes.length;
-}
-
-
-
-/* =========================================
-   DISPLAY IMAGE
-========================================= */
-
-function displayResult(decoded) {
+     * Build final file.
+     */
 
     const blob =
         new Blob(
-            [decoded.bytes],
+            [data],
             {
-                type: decoded.type
+                type: mimeType ||
+                    "application/octet-stream"
             }
         );
 
-
-    const imageURL =
+    const url =
         URL.createObjectURL(blob);
 
+    /*
+     * Final image.
+     */
 
-    receivedImage.src =
-        imageURL;
+    if (
+        mimeType.startsWith("image/")
+    ) {
 
+        receivedImage.src =
+            url;
 
-    resultType.textContent =
-        decoded.type;
+        receivedImage.style.display =
+            "block";
+    }
 
+    /*
+     * Download button.
+     */
 
-    resultSize.textContent =
-        formatBytes(
-            decoded.bytes.length
-        );
+    downloadButton.href =
+        url;
 
+    downloadButton.download =
+        fileName ||
+        "soniccrypt-file";
 
-    result.hidden = false;
-
-
-    receiverState.textContent =
-        "COMPLETE";
-
-    decodeStatus.textContent =
-        "SUCCESS";
-
-    signalText.textContent =
-        "DECODED";
-
-
-    writeLog(
-        "TRANSMISSION SUCCESSFUL\n\n" +
-        "File: " +
-        decoded.name +
-        "\n" +
-        "Type: " +
-        decoded.type +
-        "\n" +
-        "Size: " +
-        formatBytes(
-            decoded.bytes.length
-        ) +
-        "\n\n" +
-        "Image reconstructed successfully."
-    );
+    downloadButton.style.display =
+        "block";
 }
 
 
+/*
+ * RESET
+ */
 
-/* =========================================
-   LOG
-========================================= */
+function resetDecoder() {
 
-function writeLog(message) {
+    symbolBuffer = [];
 
-    decoderLog.textContent =
-        message;
+    detectedHeader = false;
+
+    expectedFileSize = 0;
+    expectedCRC = 0;
+
+    fileName = "";
+    mimeType = "";
+
+    payloadBits = [];
+
+    receivedBytes = [];
+
+    sampleBuffer = [];
+
+    lastPreviewUpdate = 0;
+
+    fileNameElement.textContent =
+        "Waiting for SONICCRYPT...";
+
+    receivedBytesElement.textContent =
+        "0 B";
+
+    expectedBytesElement.textContent =
+        "0 B";
+
+    receiveSpeed.textContent =
+        "0 B/s";
+
+    receivedText.textContent =
+        "0 B / 0 B";
+
+    receivePercent.textContent =
+        "0%";
+
+    receiveFill.style.width =
+        "0%";
+
+    receivedImage.style.display =
+        "none";
+
+    receivedImage.removeAttribute("src");
+
+    downloadButton.style.display =
+        "none";
+
+    previewStatus.textContent =
+        "Waiting for data...";
 }
 
 
+/*
+ * CRC32
+ */
 
-/* =========================================
-   FORMAT BYTES
-========================================= */
+function crc32(bytes) {
+
+    let crc =
+        0xffffffff;
+
+    for (const byte of bytes) {
+
+        crc ^= byte;
+
+        for (let i = 0; i < 8; i++) {
+
+            crc =
+                (
+                    crc >>> 1
+                ) ^
+                (
+                    -(crc & 1) &
+                    0xedb88320
+                );
+        }
+    }
+
+    return (
+        crc ^
+        0xffffffff
+    ) >>> 0;
+}
+
+
+/*
+ * FORMAT
+ */
 
 function formatBytes(bytes) {
 
@@ -1394,21 +1220,19 @@ function formatBytes(bytes) {
         return "0 B";
     }
 
-
-    const units = [
-        "B",
-        "KB",
-        "MB",
-        "GB"
-    ];
-
+    const units =
+        [
+            "B",
+            "KB",
+            "MB",
+            "GB"
+        ];
 
     const index =
         Math.floor(
             Math.log(bytes) /
             Math.log(1024)
         );
-
 
     return (
         (
@@ -1417,10 +1241,27 @@ function formatBytes(bytes) {
                 1024,
                 index
             )
-        ).toFixed(2)
-        +
-        " "
-        +
-        units[index]
+        ).toFixed(
+            index === 0 ? 0 : 2
+        )
+        + " "
+        + units[index]
     );
 }
+
+
+/*
+ * INITIAL
+ */
+
+log(
+    "SONICCRYPT receiver initialized."
+);
+
+log(
+    "16-FSK decoder ready."
+);
+
+log(
+    "Press START LISTENING."
+);
