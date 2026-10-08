@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>SONICCRYPT RECEIVER</title>
+
+    <link
+        rel="stylesheet"
+        href="style.css"
+    >
+
+</head>
+
+<body>
+
+    <div class="grid"></div>
+
+    <main class="app">
+
+        <header>
+
+            <div class="brand">
+
+                <div class="logo">
+                    S
+                </div>
+
+                <div>
+
+                    <h1>SONICCRYPT</h1>
+
+                    <p>ACOUSTIC RECEIVER</p>
+
+                </div>
+
+            </div>
+
+            <div
+                class="connection"
+                id="connectionStatus"
+            >
+
+                <span></span>
+
+                MICROPHONE OFF
+
+            </div>
+
+        </header>
+
+
+        <section class="hero">
+
+            <div class="tag">
+                SONICCRYPT RX
+            </div>
+
+            <h2>
+                Receive data
+                <span>through sound.</span>
+            </h2>
+
+            <p>
+                Place this device near the transmitting
+                speaker and decode the acoustic signal
+                directly inside your browser.
+            </p>
+
+        </section>
+
+
+        <section class="receiver-panel">
+
+            <div class="panel-title">
+
+                <div>
+
+                    <small>01</small>
+
+                    <h3>
+                        ACOUSTIC RECEIVER
+                    </h3>
+
+                </div>
+
+                <div
+                    class="state"
+                    id="receiverState"
+                >
+                    STANDBY
+                </div>
+
+            </div>
+
+
+            <div class="radar">
+
+                <div class="radar-ring ring-one"></div>
+
+                <div class="radar-ring ring-two"></div>
+
+                <div class="radar-ring ring-three"></div>
+
+                <div
+                    class="radar-sweep"
+                    id="radarSweep"
+                ></div>
+
+                <div class="radar-center">
+
+                    <div class="mic-symbol">
+                        MIC
+                    </div>
+
+                    <strong id="signalText">
+                        WAITING
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+            <div class="signal-meter">
+
+                <div class="meter-header">
+
+                    <span>
+                        SIGNAL LEVEL
+                    </span>
+
+                    <span id="signalPercent">
+                        0%
+                    </span>
+
+                </div>
+
+                <div class="meter">
+
+                    <div
+                        id="signalBar"
+                    ></div>
+
+                </div>
+
+            </div>
+
+
+            <div class="frequency-display">
+
+                <div>
+
+                    <span>
+                        DETECTED FREQUENCY
+                    </span>
+
+                    <strong
+                        id="frequency"
+                    >
+                        ---
+                    </strong>
+
+                </div>
+
+                <div>
+
+                    <span>
+                        CURRENT BIT
+                    </span>
+
+                    <strong
+                        id="currentBit"
+                    >
+                        -
+                    </strong>
+
+                </div>
+
+                <div>
+
+                    <span>
+                        BITS RECEIVED
+                    </span>
+
+                    <strong
+                        id="bitsReceived"
+                    >
+                        0
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+            <div class="buttons">
+
+                <button
+                    id="startButton"
+                    class="primary"
+                >
+                    START LISTENING
+                </button>
+
+                <button
+                    id="stopButton"
+                    class="secondary"
+                    disabled
+                >
+                    STOP
+                </button>
+
+            </div>
+
+        </section>
+
+
+        <section class="decode-panel">
+
+            <div class="panel-title">
+
+                <div>
+
+                    <small>02</small>
+
+                    <h3>
+                        DECODER
+                    </h3>
+
+                </div>
+
+                <div
+                    id="decodeStatus"
+                    class="state"
+                >
+                    READY
+                </div>
+
+            </div>
+
+
+            <div class="decode-info">
+
+                <div>
+
+                    <span>PROTOCOL</span>
+
+                    <strong>
+                        5 + 8 BIT
+                    </strong>
+
+                </div>
+
+                <div>
+
+                    <span>MODULATION</span>
+
+                    <strong>
+                        FSK
+                    </strong>
+
+                </div>
+
+                <div>
+
+                    <span>ZERO</span>
+
+                    <strong>
+                        1200 Hz
+                    </strong>
+
+                </div>
+
+                <div>
+
+                    <span>ONE</span>
+
+                    <strong>
+                        2200 Hz
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+            <div class="decoder-log">
+
+                <div
+                    id="decoderLog"
+                >
+                    SONICCRYPT RECEIVER READY...
+                </div>
+
+            </div>
+
+
+            <div
+                class="result"
+                id="result"
+                hidden
+            >
+
+                <div class="success">
+                    TRANSMISSION DECODED
+                </div>
+
+                <img
+                    id="receivedImage"
+                    alt="Received image"
+                >
+
+                <div class="result-details">
+
+                    <div>
+
+                        <span>FILE TYPE</span>
+
+                        <strong
+                            id="resultType"
+                        >
+                            -
+                        </strong>
+
+                    </div>
+
+                    <div>
+
+                        <span>SIZE</span>
+
+                        <strong
+                            id="resultSize"
+                        >
+                            -
+                        </strong>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <footer>
+
+            <span>
+                SONICCRYPT RX
+            </span>
+
+            <span>
+                LOCAL PROCESSING · NO SERVER
+            </span>
+
+        </footer>
+
+    </main>
+
+
+    <script src="script.js"></script>
+
+</body>
+
+</html>
