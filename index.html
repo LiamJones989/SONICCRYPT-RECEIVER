@@ -3,150 +3,205 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SONICCRYPT RECEIVER</title>
+
+    <title>SONICCRYPT | Receiver</title>
+
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
-<div class="container">
+    <div class="background-grid"></div>
 
-    <header>
-        <div class="logo">SONICCRYPT</div>
-        <div class="subtitle">TURBO ACOUSTIC DATA RECEIVER</div>
-    </header>
+    <main class="container">
+
+        <header>
+
+            <div class="logo">
+                SONICCRYPT
+            </div>
+
+            <div class="subtitle">
+                ACOUSTIC DATA RECEIVER
+            </div>
+
+        </header>
 
 
-    <main>
+        <section class="card">
 
-        <section class="panel">
+            <div class="section-title">
+                RECEIVER CONTROL
+            </div>
 
-            <h2>RECEIVER</h2>
+            <button id="startButton">
+                START LISTENING
+            </button>
 
-            <div id="status" class="status">
+            <button
+                id="stopButton"
+                class="secondary"
+                disabled
+            >
+                STOP LISTENING
+            </button>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="section-title">
+                LIVE SIGNAL
+            </div>
+
+
+            <div class="frequency-display">
+
+                <div class="frequency-label">
+                    DETECTED FREQUENCY
+                </div>
+
+                <div id="frequency">
+                    WAITING
+                </div>
+
+            </div>
+
+
+            <div class="signal-container">
+
+                <div
+                    id="signalBar"
+                    class="signal-bar"
+                ></div>
+
+            </div>
+
+
+            <div class="stats">
+
+                <div class="stat">
+
+                    <span class="stat-label">
+                        PROTOCOL
+                    </span>
+
+                    <span class="stat-value">
+                        2-FSK
+                    </span>
+
+                </div>
+
+
+                <div class="stat">
+
+                    <span class="stat-label">
+                        BIT 0
+                    </span>
+
+                    <span class="stat-value">
+                        1200 Hz
+                    </span>
+
+                </div>
+
+
+                <div class="stat">
+
+                    <span class="stat-label">
+                        BIT 1
+                    </span>
+
+                    <span class="stat-value">
+                        2400 Hz
+                    </span>
+
+                </div>
+
+
+                <div class="stat">
+
+                    <span class="stat-label">
+                        SYMBOL
+                    </span>
+
+                    <span class="stat-value">
+                        100 ms
+                    </span>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <section class="card">
+
+            <div class="section-title">
+                RECEIVER STATUS
+            </div>
+
+            <div
+                id="status"
+                class="status-box"
+            >
                 MICROPHONE OFF
             </div>
 
-            <div class="controls">
+        </section>
 
-                <button id="startButton">
-                    START LISTENING
-                </button>
 
-                <button id="stopButton" disabled>
-                    STOP
-                </button>
+        <section class="card">
 
+            <div class="section-title">
+                RECEIVED DATA
+            </div>
+
+            <div
+                id="receivedMessage"
+                class="received-message"
+            >
+                Nothing received yet.
             </div>
 
         </section>
 
 
-        <section class="panel">
+        <section class="card">
 
-            <h2>LIVE SIGNAL</h2>
-
-            <div class="signal-grid">
-
-                <div class="signal-box">
-                    <span>SIGNAL</span>
-                    <strong id="signalStrength">0%</strong>
-                </div>
-
-                <div class="signal-box">
-                    <span>FREQUENCY</span>
-                    <strong id="frequency">---</strong>
-                </div>
-
-                <div class="signal-box">
-                    <span>SYMBOLS</span>
-                    <strong id="symbolsReceived">0</strong>
-                </div>
-
+            <div class="section-title">
+                DECODER LOG
             </div>
-
-            <div class="signal-bar">
-                <div id="signalFill"></div>
-            </div>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>TRANSMISSION</h2>
-
-            <div id="fileName" class="file-name">
-                Waiting for SONICCRYPT...
-            </div>
-
-            <div class="progress-info">
-                <span id="receivedText">0 B / 0 B</span>
-                <strong id="receivePercent">0%</strong>
-            </div>
-
-            <div class="progress-bar">
-                <div id="receiveFill"></div>
-            </div>
-
-            <div class="receive-stats">
-
-                <div>
-                    <span>RECEIVED</span>
-                    <strong id="receivedBytes">0 B</strong>
-                </div>
-
-                <div>
-                    <span>EXPECTED</span>
-                    <strong id="expectedBytes">0 B</strong>
-                </div>
-
-                <div>
-                    <span>SPEED</span>
-                    <strong id="receiveSpeed">0 B/s</strong>
-                </div>
-
-            </div>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>LIVE IMAGE / FILE</h2>
-
-            <div id="previewStatus">
-                Waiting for data...
-            </div>
-
-            <div class="image-container">
-                <img id="receivedImage" alt="Received file">
-            </div>
-
-            <a id="downloadButton" class="download-button">
-                DOWNLOAD RECEIVED FILE
-            </a>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>RECEIVER LOG</h2>
 
             <div id="log"></div>
 
         </section>
 
+
+        <div class="warning">
+
+            Microphone access requires HTTPS.
+            GitHub Pages provides HTTPS automatically.
+
+            <br><br>
+
+            For the first test, place the receiver
+            microphone relatively close to the sender
+            speaker.
+
+        </div>
+
+
+        <footer>
+            SONICCRYPT TEST PROTOCOL v1
+        </footer>
+
     </main>
 
-    <footer>
-        SONICCRYPT // 16-FSK // LIVE ACOUSTIC DECODER
-    </footer>
 
-</div>
-
-<script src="script.js"></script>
+    <script src="script.js"></script>
 
 </body>
 </html>
