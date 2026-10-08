@@ -1,7 +1,14 @@
 const SAMPLE_RATE = 44100;
 
 /*
- * MUST MATCH THE TRANSMITTER
+ * SONICCRYPT TURBO
+ *
+ * 16-FSK
+ *
+ * 0  = 1000 Hz
+ * 1  = 1200 Hz
+ * ...
+ * 15 = 4000 Hz
  */
 
 const FREQUENCIES = Array.from(
@@ -9,109 +16,132 @@ const FREQUENCIES = Array.from(
     (_, i) => 1000 + i * 200
 );
 
-const SYMBOL_DURATIONS = {
-    turbo: 0.003,
+
+/*
+ * TRANSMISSION SPEEDS
+ *
+ * 4 ms = fast
+ * 6 ms = reliable
+ */
+
+const MODES = {
+    turbo: 0.004,
     reliable: 0.006
 };
 
-const SYMBOL_DURATION =
-    SYMBOL_DURATIONS.turbo;
+let currentMode = "turbo";
 
 
 /*
- * AUDIO
+ * SYNCHRONIZATION
+ *
+ * Alternating extreme frequencies.
+ *
+ * 0 = 1000 Hz
+ * F = 4000 Hz
+ *
+ * This lets the receiver find the
+ * exact beginning of the transmission.
  */
+
+const PREAMBLE = [];
+
+for (let i = 0; i < 32; i++) {
+    PREAMBLE.push(i % 2 === 0 ? 0 : 15);
+}
+
+
+let selectedFile = null;
+
+let transmissionBytes = [];
+let transmissionSymbols = [];
+
+let audioBuffer = null;
 
 let audioContext = null;
-let microphone = null;
-let processor = null;
-let silentGain = null;
+let sourceNode = null;
 
-let sampleBuffer = [];
+let isPlaying = false;
+let isPaused = false;
 
-let listening = false;
+let transmissionStart = 0;
+let pausedAt = 0;
 
-
-/*
- * DECODER STATE
- */
-
-let symbolBuffer = [];
-
-let detectedHeader = false;
-
-let expectedFileSize = 0;
-let expectedCRC = 0;
-
-let fileName = "";
-let mimeType = "";
-
-let payloadBits = [];
-
-let receivedBytes = [];
-
-let receiveStartTime = 0;
-
-let lastPreviewUpdate = 0;
+let animationFrame = null;
 
 
 /*
  * ELEMENTS
  */
 
-const startButton =
-    document.getElementById("startButton");
+const fileInput =
+    document.getElementById("fileInput");
 
-const stopButton =
-    document.getElementById("stopButton");
+const fileInfo =
+    document.getElementById("fileInfo");
+
+const imagePreview =
+    document.getElementById("imagePreview");
+
+const previewContainer =
+    document.getElementById("previewContainer");
 
 const statusElement =
     document.getElementById("status");
 
-const signalStrength =
-    document.getElementById("signalStrength");
+const elapsedTime =
+    document.getElementById("elapsedTime");
 
-const signalFill =
-    document.getElementById("signalFill");
+const remainingTime =
+    document.getElementById("remainingTime");
 
-const frequencyElement =
-    document.getElementById("frequency");
+const totalTime =
+    document.getElementById("totalTime");
 
-const symbolsReceived =
-    document.getElementById("symbolsReceived");
+const progressFill =
+    document.getElementById("progressFill");
 
-const fileNameElement =
-    document.getElementById("fileName");
+const progressPercent =
+    document.getElementById("progressPercent");
 
-const receivedText =
-    document.getElementById("receivedText");
+const playButton =
+    document.getElementById("playButton");
 
-const receivePercent =
-    document.getElementById("receivePercent");
+const pauseButton =
+    document.getElementById("pauseButton");
 
-const receiveFill =
-    document.getElementById("receiveFill");
+const stopButton =
+    document.getElementById("stopButton");
 
-const receivedBytesElement =
-    document.getElementById("receivedBytes");
+const dataSize =
+    document.getElementById("dataSize");
 
-const expectedBytesElement =
-    document.getElementById("expectedBytes");
+const encodedBits =
+    document.getElementById("encodedBits");
 
-const receiveSpeed =
-    document.getElementById("receiveSpeed");
+const symbolCount =
+    document.getElementById("symbolCount");
 
-const receivedImage =
-    document.getElementById("receivedImage");
+const symbolSpeed =
+    document.getElementById("symbolSpeed");
 
-const previewStatus =
-    document.getElementById("previewStatus");
+const canvas =
+    document.getElementById("waveformCanvas");
 
-const downloadButton =
-    document.getElementById("downloadButton");
+const ctx =
+    canvas.getContext("2d");
 
 const logElement =
     document.getElementById("log");
+
+const turboButton =
+    document.getElementById("turboMode");
+
+const reliableButton =
+    document.getElementById("reliableMode");
+
+const modeInfo =
+    document.getElementById("modeInfo");
 
 
 /*
@@ -127,7 +157,9 @@ function log(message) {
         "log-entry";
 
     entry.innerHTML =
-        `<span class="log-time">[${new Date().toLocaleTimeString()}]</span> ${message}`;
+        `<span class="log-time">
+            [${new Date().toLocaleTimeString()}]
+        </span> ${message}`;
 
     logElement.appendChild(entry);
 
@@ -137,454 +169,271 @@ function log(message) {
 
 
 /*
- * START
+ * MODE
  */
 
-startButton.onclick =
-    startListening;
+turboButton.onclick =
+    () => setMode("turbo");
+
+reliableButton.onclick =
+    () => setMode("reliable");
 
 
-async function startListening() {
+function setMode(mode) {
 
-    if (listening) {
+    if (isPlaying || isPaused) {
         return;
     }
 
-    try {
-
-        const stream =
-            await navigator.mediaDevices
-                .getUserMedia({
-                    audio: {
-                        channelCount: 1,
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false
-                    }
-                });
-
-        audioContext =
-            new AudioContext({
-                sampleRate: SAMPLE_RATE
-            });
-
-        await audioContext.resume();
-
-        microphone =
-            audioContext.createMediaStreamSource(
-                stream
-            );
-
-        /*
-         * ScriptProcessor is used here because it
-         * works directly in a normal GitHub Pages
-         * project without another JS file.
-         */
-
-        processor =
-            audioContext.createScriptProcessor(
-                4096,
-                1,
-                1
-            );
-
-        /*
-         * Prevent microphone audio from being
-         * played back through the speakers.
-         */
-
-        silentGain =
-            audioContext.createGain();
-
-        silentGain.gain.value = 0;
-
-        microphone.connect(processor);
-
-        processor.connect(silentGain);
-
-        silentGain.connect(
-            audioContext.destination
-        );
-
-        processor.onaudioprocess =
-            processAudio;
-
-        listening = true;
-
-        resetDecoder();
-
-        receiveStartTime =
-            performance.now();
-
-        statusElement.textContent =
-            "LISTENING";
-
-        startButton.disabled = true;
-        stopButton.disabled = false;
-
-        log("Microphone activated.");
-        log("Waiting for SONICCRYPT sync signal...");
-
-    } catch (error) {
-
-        console.error(error);
-
-        statusElement.textContent =
-            "MICROPHONE ERROR";
-
-        log(
-            "Microphone error: " +
-            error.message
-        );
-    }
-}
-
-
-/*
- * STOP
- */
-
-stopButton.onclick =
-    stopListening;
-
-
-function stopListening() {
-
-    listening = false;
-
-    if (processor) {
-        processor.disconnect();
-        processor = null;
-    }
-
-    if (microphone) {
-        microphone.disconnect();
-        microphone = null;
-    }
-
-    if (silentGain) {
-        silentGain.disconnect();
-        silentGain = null;
-    }
-
-    if (audioContext) {
-
-        audioContext.close();
-
-        audioContext = null;
-    }
-
-    statusElement.textContent =
-        "MICROPHONE OFF";
-
-    startButton.disabled = false;
-    stopButton.disabled = true;
-
-    log("Receiver stopped.");
-}
-
-
-/*
- * AUDIO PROCESSING
- */
-
-function processAudio(event) {
-
-    if (!listening) {
-        return;
-    }
-
-    const input =
-        event.inputBuffer
-            .getChannelData(0);
-
-    /*
-     * Copy microphone samples.
-     */
-
-    for (let i = 0; i < input.length; i++) {
-
-        sampleBuffer.push(input[i]);
-    }
-
-    /*
-     * Process one symbol at a time.
-     */
-
-    const samplesPerSymbol =
-        Math.floor(
-            SAMPLE_RATE *
-            SYMBOL_DURATION
-        );
-
-    while (
-        sampleBuffer.length >=
-        samplesPerSymbol
-    ) {
-
-        const samples =
-            sampleBuffer.splice(
-                0,
-                samplesPerSymbol
-            );
-
-        const result =
-            detectFrequency(samples);
-
-        if (result) {
-
-            symbolBuffer.push(
-                result.symbol
-            );
-
-            frequencyElement.textContent =
-                `${result.frequency} Hz`;
-
-            updateSignal(
-                result.strength
-            );
-
-            decodeSymbols();
-        }
-    }
-}
-
-
-/*
- * 16-FSK DETECTOR
- */
-
-function detectFrequency(samples) {
-
-    let bestSymbol = -1;
-    let bestPower = 0;
-
-    /*
-     * Goertzel-style frequency measurement.
-     */
-
-    for (
-        let symbol = 0;
-        symbol < FREQUENCIES.length;
-        symbol++
-    ) {
-
-        const frequency =
-            FREQUENCIES[symbol];
-
-        const power =
-            goertzel(
-                samples,
-                frequency,
-                SAMPLE_RATE
-            );
-
-        if (power > bestPower) {
-
-            bestPower = power;
-            bestSymbol = symbol;
-        }
-    }
-
-    const strength =
-        Math.min(
-            100,
-            bestPower * 100000
-        );
-
-    if (bestSymbol < 0) {
-        return null;
-    }
-
-    return {
-        symbol: bestSymbol,
-        frequency:
-            FREQUENCIES[bestSymbol],
-        strength
-    };
-}
-
-
-/*
- * GOERTZEL
- */
-
-function goertzel(
-    samples,
-    frequency,
-    sampleRate
-) {
-
-    const k =
-        Math.round(
-            0.5 +
-            (
-                samples.length *
-                frequency /
-                sampleRate
-            )
-        );
-
-    const omega =
-        2 *
-        Math.PI *
-        k /
-        samples.length;
-
-    const cosine =
-        Math.cos(omega);
-
-    const sine =
-        Math.sin(omega);
-
-    const coefficient =
-        2 * cosine;
-
-    let q0 = 0;
-    let q1 = 0;
-    let q2 = 0;
-
-    for (const sample of samples) {
-
-        q0 =
-            coefficient * q1 -
-            q2 +
-            sample;
-
-        q2 = q1;
-        q1 = q0;
-    }
-
-    const real =
-        q1 -
-        q2 * cosine;
-
-    const imag =
-        q2 * sine;
-
-    return (
-        real * real +
-        imag * imag
+    currentMode = mode;
+
+    turboButton.classList.toggle(
+        "active",
+        mode === "turbo"
     );
+
+    reliableButton.classList.toggle(
+        "active",
+        mode === "reliable"
+    );
+
+    if (mode === "turbo") {
+
+        modeInfo.textContent =
+            "TURBO: 4 ms symbols. Faster transmission.";
+
+    } else {
+
+        modeInfo.textContent =
+            "RELIABLE: 6 ms symbols. Better for noisy environments.";
+    }
+
+    if (selectedFile) {
+        prepareTransmission(selectedFile);
+    }
 }
 
 
 /*
- * SIGNAL UI
+ * FILE
  */
 
-function updateSignal(value) {
+fileInput.addEventListener(
+    "change",
+    async () => {
 
-    const rounded =
-        Math.round(value);
+        const file =
+            fileInput.files[0];
 
-    signalStrength.textContent =
-        `${rounded}%`;
+        if (!file) {
+            return;
+        }
 
-    signalFill.style.width =
-        `${rounded}%`;
-}
+        stopTransmission();
 
+        selectedFile = file;
 
-/*
- * SYMBOL DECODER
- *
- * We first look for the magic:
- *
- * SCX1
- */
+        fileInfo.textContent =
+            `${file.name} — ${formatBytes(file.size)}`;
 
-function decodeSymbols() {
+        dataSize.textContent =
+            formatBytes(file.size);
 
-    symbolsReceived.textContent =
-        symbolBuffer.length.toLocaleString();
+        if (file.type.startsWith("image/")) {
 
-    /*
-     * Need at least 8 symbols for 4 bytes.
-     */
+            const url =
+                URL.createObjectURL(file);
 
-    if (!detectedHeader) {
+            imagePreview.src = url;
 
-        if (
-            findMagicSequence()
-        ) {
-
-            detectedHeader = true;
-
-            parseHeader();
+            previewContainer.style.display =
+                "block";
 
         } else {
 
-            /*
-             * Don't allow unlimited memory growth.
-             */
-
-            if (symbolBuffer.length > 2000) {
-
-                symbolBuffer =
-                    symbolBuffer.slice(-500);
-            }
+            previewContainer.style.display =
+                "none";
         }
 
-        return;
+        log(`Selected: ${file.name}`);
+
+        await prepareTransmission(file);
     }
-
-    /*
-     * Header has told us where payload begins.
-     */
-
-    decodePayload();
-}
+);
 
 
 /*
- * MAGIC SEARCH
+ * PREPARE
  */
 
-function findMagicSequence() {
+async function prepareTransmission(file) {
 
-    const magic =
-        [5, 3, 8, 1];
+    statusElement.textContent =
+        "ENCODING";
 
-    for (
-        let i = 0;
-        i <= symbolBuffer.length - magic.length;
-        i++
-    ) {
+    const buffer =
+        await file.arrayBuffer();
 
-        let match = true;
+    const bytes =
+        new Uint8Array(buffer);
 
-        for (let j = 0; j < magic.length; j++) {
 
-            if (
-                symbolBuffer[i + j] !==
-                magic[j]
-            ) {
+    /*
+     * HEADER
+     */
 
-                match = false;
-                break;
-            }
-        }
+    const header =
+        buildHeader(
+            file.name,
+            file.type ||
+                "application/octet-stream",
+            bytes.length,
+            crc32(bytes)
+        );
 
-        if (match) {
 
-            /*
-             * Keep only data from MAGIC onward.
-             */
+    /*
+     * PAYLOAD
+     *
+     * 5 random bits
+     * +
+     * 8 data bits
+     */
 
-            symbolBuffer =
-                symbolBuffer.slice(i);
+    const payloadBits =
+        encodeCustomBits(bytes);
 
-            return true;
-        }
-    }
 
-    return false;
+    /*
+     * HEADER BITS
+     */
+
+    const headerBits =
+        bytesToBits(header);
+
+
+    /*
+     * COMPLETE DATA
+     */
+
+    const allBits = [
+        ...headerBits,
+        ...payloadBits
+    ];
+
+
+    /*
+     * 4 BITS = 1 FREQUENCY
+     */
+
+    const dataSymbols =
+        bitsToSymbols(allBits);
+
+
+    /*
+     * ADD SYNC PREAMBLE
+     */
+
+    transmissionSymbols = [
+        ...PREAMBLE,
+        ...dataSymbols
+    ];
+
+
+    transmissionBytes =
+        Array.from(bytes);
+
+
+    const duration =
+        transmissionSymbols.length *
+        MODES[currentMode];
+
+
+    encodedBits.textContent =
+        allBits.length.toLocaleString();
+
+    symbolCount.textContent =
+        transmissionSymbols.length.toLocaleString();
+
+    symbolSpeed.textContent =
+        `${Math.round(
+            1 / MODES[currentMode]
+        )}/sec`;
+
+    totalTime.textContent =
+        formatTime(duration);
+
+    remainingTime.textContent =
+        formatTime(duration);
+
+    elapsedTime.textContent =
+        "00:00";
+
+    progressFill.style.width =
+        "0%";
+
+    progressPercent.textContent =
+        "0%";
+
+
+    log(
+        `File: ${file.name}`
+    );
+
+    log(
+        `Original size: ${bytes.length.toLocaleString()} bytes`
+    );
+
+    log(
+        `Payload bits: ${payloadBits.length.toLocaleString()}`
+    );
+
+    log(
+        `Header bytes: ${header.length}`
+    );
+
+    log(
+        `Total symbols: ${transmissionSymbols.length.toLocaleString()}`
+    );
+
+    log(
+        `Estimated time: ${formatTime(duration)}`
+    );
+
+
+    statusElement.textContent =
+        "GENERATING AUDIO";
+
+
+    audioBuffer =
+        createAudioBuffer(
+            transmissionSymbols
+        );
+
+
+    drawWaveform(
+        audioBuffer
+    );
+
+
+    statusElement.textContent =
+        "READY";
+
+    playButton.disabled =
+        false;
+
+    pauseButton.disabled =
+        true;
+
+    stopButton.disabled =
+        true;
 }
 
 
 /*
- * HEADER FORMAT
+ * HEADER
+ *
+ * SCX2
  *
  * 4 magic bytes
  * 1 version
@@ -596,266 +445,145 @@ function findMagicSequence() {
  * 4 CRC32
  */
 
-function parseHeader() {
+function buildHeader(
+    name,
+    mime,
+    fileSize,
+    checksum
+) {
 
-    const bytes =
-        symbolsToBytes(symbolBuffer);
+    const encoder =
+        new TextEncoder();
 
-    if (bytes.length < 7) {
-        return;
-    }
+    const nameBytes =
+        encoder.encode(name);
 
-    if (
-        bytes[0] !== 0x53 ||
-        bytes[1] !== 0x43 ||
-        bytes[2] !== 0x58 ||
-        bytes[3] !== 0x31
-    ) {
+    const mimeBytes =
+        encoder.encode(mime);
 
-        detectedHeader = false;
-        return;
-    }
+    const result = [];
 
-    const version =
-        bytes[4];
 
-    if (version !== 1) {
-
-        log("Unsupported SONICCRYPT version.");
-
-        detectedHeader = false;
-
-        return;
-    }
-
-    let position = 5;
-
-    if (bytes.length < position + 2) {
-        return;
-    }
-
-    const nameLength =
-        (bytes[position] << 8) |
-        bytes[position + 1];
-
-    position += 2;
-
-    if (
-        bytes.length <
-        position + nameLength + 2
-    ) {
-        return;
-    }
-
-    fileName =
-        new TextDecoder().decode(
-            new Uint8Array(
-                bytes.slice(
-                    position,
-                    position + nameLength
-                )
-            )
-        );
-
-    position += nameLength;
-
-    const mimeLength =
-        (bytes[position] << 8) |
-        bytes[position + 1];
-
-    position += 2;
-
-    if (
-        bytes.length <
-        position + mimeLength + 8
-    ) {
-        return;
-    }
-
-    mimeType =
-        new TextDecoder().decode(
-            new Uint8Array(
-                bytes.slice(
-                    position,
-                    position + mimeLength
-                )
-            )
-        );
-
-    position += mimeLength;
-
-    expectedFileSize =
-        (
-            bytes[position] * 0x1000000 +
-            bytes[position + 1] * 0x10000 +
-            bytes[position + 2] * 0x100 +
-            bytes[position + 3]
-        ) >>> 0;
-
-    position += 4;
-
-    expectedCRC =
-        (
-            bytes[position] * 0x1000000 +
-            bytes[position + 1] * 0x10000 +
-            bytes[position + 2] * 0x100 +
-            bytes[position + 3]
-        ) >>> 0;
-
-    /*
-     * Remove header symbols.
-     */
-
-    const headerBytes =
-        position;
-
-    const headerSymbols =
-        headerBytes * 2;
-
-    symbolBuffer =
-        symbolBuffer.slice(
-            headerSymbols
-        );
-
-    fileNameElement.textContent =
-        fileName;
-
-    expectedBytesElement.textContent =
-        formatBytes(expectedFileSize);
-
-    previewStatus.textContent =
-        "Receiving...";
-
-    log(
-        `SONICCRYPT transmission detected: ${fileName}`
+    result.push(
+        0x53,
+        0x43,
+        0x58,
+        0x32
     );
 
-    log(
-        `Expected size: ${formatBytes(expectedFileSize)}`
+
+    result.push(2);
+
+
+    result.push(
+        (nameBytes.length >> 8) & 0xff,
+        nameBytes.length & 0xff
     );
 
-    log(
-        `MIME type: ${mimeType}`
+    result.push(
+        ...nameBytes
     );
 
-    log(
-        `CRC32: ${expectedCRC.toString(16).padStart(8, "0")}`
+
+    result.push(
+        (mimeBytes.length >> 8) & 0xff,
+        mimeBytes.length & 0xff
     );
+
+    result.push(
+        ...mimeBytes
+    );
+
+
+    result.push(
+        (fileSize >>> 24) & 0xff,
+        (fileSize >>> 16) & 0xff,
+        (fileSize >>> 8) & 0xff,
+        fileSize & 0xff
+    );
+
+
+    result.push(
+        (checksum >>> 24) & 0xff,
+        (checksum >>> 16) & 0xff,
+        (checksum >>> 8) & 0xff,
+        checksum & 0xff
+    );
+
+
+    return new Uint8Array(result);
 }
 
 
 /*
- * SYMBOLS -> BYTES
+ * CUSTOM PROTOCOL
+ *
+ * Every byte becomes:
+ *
+ * RANDOM RANDOM RANDOM RANDOM RANDOM
+ * DATA DATA DATA DATA DATA DATA DATA DATA
+ *
+ * 13 bits total
  */
 
-function symbolsToBytes(symbols) {
-
-    const bytes = [];
-
-    for (
-        let i = 0;
-        i + 1 < symbols.length;
-        i += 2
-    ) {
-
-        bytes.push(
-            (
-                symbols[i] << 4
-            ) |
-            symbols[i + 1]
-        );
-    }
-
-    return bytes;
-}
-
-
-/*
- * PAYLOAD
- *
- * Every original byte is:
- *
- * 5 random bits
- * 8 data bits
- *
- * = 13 bits
- */
-
-function decodePayload() {
-
-    /*
-     * Convert incoming symbols into bits.
-     */
+function encodeCustomBits(bytes) {
 
     const bits = [];
 
-    for (const symbol of symbolBuffer) {
+    for (const byte of bytes) {
 
-        bits.push(
-            (symbol >> 3) & 1,
-            (symbol >> 2) & 1,
-            (symbol >> 1) & 1,
-            symbol & 1
+        const randomBits =
+            new Uint8Array(5);
+
+        crypto.getRandomValues(
+            randomBits
         );
-    }
 
-    /*
-     * We need complete 13-bit blocks.
-     */
 
-    while (bits.length >= 13) {
+        for (let i = 0; i < 5; i++) {
 
-        /*
-         * Ignore the first five random bits.
-         */
-
-        let value = 0;
-
-        for (let i = 5; i < 13; i++) {
-
-            value =
-                (value << 1) |
-                bits[i];
+            bits.push(
+                randomBits[i] & 1
+            );
         }
 
-        receivedBytes.push(value);
 
-        bits.splice(0, 13);
+        for (let i = 7; i >= 0; i--) {
 
-        /*
-         * We only need enough bytes for
-         * the actual file.
-         */
-
-        if (
-            receivedBytes.length >=
-            expectedFileSize
-        ) {
-
-            finishReception();
-
-            return;
+            bits.push(
+                (byte >> i) & 1
+            );
         }
     }
 
-    /*
-     * Keep incomplete bits.
-     *
-     * Convert remaining bits back into
-     * symbol form for the next pass.
-     */
-
-    symbolBuffer =
-        bitsToSymbols(bits);
-
-    updateReceiveProgress();
-
-    updateLivePreview();
+    return bits;
 }
 
 
 /*
- * BITS -> SYMBOLS
+ * BYTES -> BITS
+ */
+
+function bytesToBits(bytes) {
+
+    const bits = [];
+
+    for (const byte of bytes) {
+
+        for (let i = 7; i >= 0; i--) {
+
+            bits.push(
+                (byte >> i) & 1
+            );
+        }
+    }
+
+    return bits;
+}
+
+
+/*
+ * BITS -> 4-BIT SYMBOLS
  */
 
 function bitsToSymbols(bits) {
@@ -870,11 +598,7 @@ function bitsToSymbols(bits) {
 
         let value = 0;
 
-        for (
-            let j = 0;
-            j < 4;
-            j++
-        ) {
+        for (let j = 0; j < 4; j++) {
 
             value <<= 1;
 
@@ -896,133 +620,389 @@ function bitsToSymbols(bits) {
 
 
 /*
- * LIVE PROGRESS
+ * AUDIO GENERATION
  */
 
-function updateReceiveProgress() {
+function createAudioBuffer(symbols) {
 
-    if (!expectedFileSize) {
-        return;
-    }
+    const duration =
+        MODES[currentMode];
 
-    const count =
-        Math.min(
-            receivedBytes.length,
-            expectedFileSize
+    const samplesPerSymbol =
+        Math.round(
+            SAMPLE_RATE *
+            duration
         );
 
-    const percent =
-        (
-            count /
-            expectedFileSize
-        ) * 100;
+    const totalSamples =
+        samplesPerSymbol *
+        symbols.length;
 
-    receiveFill.style.width =
-        `${percent}%`;
 
-    receivePercent.textContent =
-        `${percent.toFixed(1)}%`;
+    const buffer =
+        new AudioBuffer({
+            length: totalSamples,
+            numberOfChannels: 1,
+            sampleRate: SAMPLE_RATE
+        });
 
-    receivedBytesElement.textContent =
-        formatBytes(count);
 
-    receivedText.textContent =
-        `${formatBytes(count)} / ${formatBytes(expectedFileSize)}`;
+    const channel =
+        buffer.getChannelData(0);
 
-    const elapsed =
-        (
-            performance.now() -
-            receiveStartTime
-        ) / 1000;
 
-    const speed =
-        elapsed > 0
-            ? count / elapsed
-            : 0;
+    let position = 0;
 
-    receiveSpeed.textContent =
-        `${formatBytes(speed)}/s`;
+    let phase = 0;
+
+
+    for (const symbol of symbols) {
+
+        const frequency =
+            FREQUENCIES[symbol];
+
+        const phaseStep =
+            2 *
+            Math.PI *
+            frequency /
+            SAMPLE_RATE;
+
+
+        const fadeSamples =
+            Math.min(
+                16,
+                Math.floor(
+                    samplesPerSymbol / 5
+                )
+            );
+
+
+        for (
+            let i = 0;
+            i < samplesPerSymbol;
+            i++
+        ) {
+
+            let envelope = 1;
+
+
+            if (
+                i <
+                fadeSamples
+            ) {
+
+                envelope =
+                    i /
+                    fadeSamples;
+
+            } else if (
+                i >
+                samplesPerSymbol -
+                fadeSamples
+            ) {
+
+                envelope =
+                    (
+                        samplesPerSymbol -
+                        i
+                    ) /
+                    fadeSamples;
+            }
+
+
+            channel[position++] =
+                Math.sin(phase) *
+                0.45 *
+                envelope;
+
+
+            phase +=
+                phaseStep;
+
+
+            if (
+                phase >
+                Math.PI * 2
+            ) {
+
+                phase -=
+                    Math.PI * 2;
+            }
+        }
+    }
+
+
+    return buffer;
 }
 
 
 /*
- * LIVE IMAGE
- *
- * Browsers normally require a complete valid
- * image before displaying JPEG/PNG.
- *
- * We still attempt a preview periodically.
+ * PLAY
  */
 
-function updateLivePreview() {
+playButton.onclick =
+    async () => {
 
-    const now =
-        performance.now();
+        if (!audioBuffer) {
+            return;
+        }
 
-    if (
-        now -
-        lastPreviewUpdate <
-        500
-    ) {
+        if (isPaused) {
 
-        return;
-    }
+            await resumeTransmission();
 
-    lastPreviewUpdate = now;
+        } else {
 
-    if (
-        !mimeType.startsWith("image/")
-    ) {
+            await startTransmission();
+        }
+    };
 
-        previewStatus.textContent =
-            `${formatBytes(receivedBytes.length)} received`;
 
-        return;
-    }
+async function startTransmission() {
 
-    try {
+    stopAudioOnly();
 
-        const blob =
-            new Blob(
-                [
-                    new Uint8Array(
-                        receivedBytes
-                    )
-                ],
-                {
-                    type: mimeType
-                }
-            );
 
-        const url =
-            URL.createObjectURL(blob);
+    audioContext =
+        new AudioContext({
+            sampleRate: SAMPLE_RATE
+        });
 
-        const testImage =
-            new Image();
 
-        testImage.onload = () => {
+    await audioContext.resume();
 
-            receivedImage.src =
-                url;
 
-            receivedImage.style.display =
-                "block";
+    sourceNode =
+        audioContext.createBufferSource();
 
-            previewStatus.textContent =
-                "LIVE IMAGE PREVIEW";
 
+    sourceNode.buffer =
+        audioBuffer;
+
+
+    sourceNode.connect(
+        audioContext.destination
+    );
+
+
+    sourceNode.onended =
+        () => {
+
+            if (isPlaying) {
+                finishTransmission();
+            }
         };
 
-        testImage.onerror = () => {
 
-            URL.revokeObjectURL(url);
-        };
+    sourceNode.start();
 
-        testImage.src = url;
 
-    } catch {
+    transmissionStart =
+        audioContext.currentTime;
 
-        // Continue receiving.
+
+    pausedAt = 0;
+
+    isPlaying = true;
+    isPaused = false;
+
+
+    statusElement.textContent =
+        "TRANSMITTING";
+
+
+    playButton.disabled = true;
+    pauseButton.disabled = false;
+    stopButton.disabled = false;
+
+
+    log(
+        "Transmission started."
+    );
+
+
+    updateTimer();
+}
+
+
+/*
+ * PAUSE
+ */
+
+pauseButton.onclick =
+    async () => {
+
+        if (
+            !audioContext ||
+            !isPlaying
+        ) {
+            return;
+        }
+
+
+        pausedAt =
+            audioContext.currentTime -
+            transmissionStart;
+
+
+        await audioContext.suspend();
+
+
+        isPlaying = false;
+        isPaused = true;
+
+
+        statusElement.textContent =
+            "PAUSED";
+
+
+        playButton.textContent =
+            "RESUME";
+
+
+        playButton.disabled = false;
+        pauseButton.disabled = true;
+
+
+        log(
+            "Transmission paused."
+        );
+    };
+
+
+/*
+ * RESUME
+ */
+
+async function resumeTransmission() {
+
+    await audioContext.resume();
+
+
+    transmissionStart =
+        audioContext.currentTime -
+        pausedAt;
+
+
+    isPlaying = true;
+    isPaused = false;
+
+
+    statusElement.textContent =
+        "TRANSMITTING";
+
+
+    playButton.textContent =
+        "PAUSE";
+
+
+    playButton.disabled = true;
+    pauseButton.disabled = false;
+
+
+    log(
+        "Transmission resumed."
+    );
+
+
+    updateTimer();
+}
+
+
+/*
+ * STOP
+ */
+
+stopButton.onclick =
+    () => {
+
+        stopTransmission();
+    };
+
+
+function stopTransmission() {
+
+    stopAudioOnly();
+
+
+    isPlaying = false;
+    isPaused = false;
+
+    pausedAt = 0;
+
+
+    cancelAnimationFrame(
+        animationFrame
+    );
+
+
+    const duration =
+        audioBuffer
+            ? audioBuffer.duration
+            : 0;
+
+
+    elapsedTime.textContent =
+        "00:00";
+
+
+    remainingTime.textContent =
+        formatTime(duration);
+
+
+    progressFill.style.width =
+        "0%";
+
+    progressPercent.textContent =
+        "0%";
+
+
+    statusElement.textContent =
+        audioBuffer
+            ? "READY"
+            : "WAITING FOR FILE";
+
+
+    playButton.textContent =
+        "PLAY";
+
+
+    playButton.disabled =
+        !audioBuffer;
+
+    pauseButton.disabled = true;
+    stopButton.disabled = true;
+
+
+    log(
+        "Transmission stopped."
+    );
+}
+
+
+/*
+ * STOP AUDIO
+ */
+
+function stopAudioOnly() {
+
+    if (sourceNode) {
+
+        try {
+            sourceNode.stop();
+        } catch {}
+
+        sourceNode.disconnect();
+
+        sourceNode = null;
+    }
+
+
+    if (audioContext) {
+
+        audioContext.close();
+
+        audioContext = null;
     }
 }
 
@@ -1031,149 +1011,204 @@ function updateLivePreview() {
  * FINISH
  */
 
-function finishReception() {
+function finishTransmission() {
 
-    const data =
-        new Uint8Array(
-            receivedBytes
-        );
+    isPlaying = false;
+    isPaused = false;
 
-    const actualCRC =
-        crc32(data);
 
-    updateReceiveProgress();
+    cancelAnimationFrame(
+        animationFrame
+    );
 
-    if (
-        actualCRC !== expectedCRC
-    ) {
-
-        statusElement.textContent =
-            "CHECKSUM ERROR";
-
-        previewStatus.textContent =
-            "Transmission completed, but the checksum failed.";
-
-        log(
-            `CRC ERROR. Expected ${expectedCRC.toString(16)}, got ${actualCRC.toString(16)}`
-        );
-
-        return;
-    }
 
     statusElement.textContent =
         "TRANSMISSION COMPLETE";
 
-    receiveFill.style.width = "100%";
-    receivePercent.textContent = "100%";
 
-    previewStatus.textContent =
-        "FILE RECEIVED SUCCESSFULLY";
+    playButton.disabled = false;
+    pauseButton.disabled = true;
+    stopButton.disabled = true;
 
-    log("Transmission complete.");
-    log("CRC32 verified successfully.");
 
-    /*
-     * Build final file.
-     */
+    progressFill.style.width =
+        "100%";
 
-    const blob =
-        new Blob(
-            [data],
-            {
-                type: mimeType ||
-                    "application/octet-stream"
-            }
+    progressPercent.textContent =
+        "100%";
+
+
+    elapsedTime.textContent =
+        formatTime(
+            audioBuffer.duration
         );
 
-    const url =
-        URL.createObjectURL(blob);
 
-    /*
-     * Final image.
-     */
+    remainingTime.textContent =
+        "00:00";
 
-    if (
-        mimeType.startsWith("image/")
-    ) {
 
-        receivedImage.src =
-            url;
+    log(
+        "Transmission complete."
+    );
 
-        receivedImage.style.display =
-            "block";
+
+    if (audioContext) {
+
+        audioContext.close();
+
+        audioContext = null;
     }
 
-    /*
-     * Download button.
-     */
 
-    downloadButton.href =
-        url;
-
-    downloadButton.download =
-        fileName ||
-        "soniccrypt-file";
-
-    downloadButton.style.display =
-        "block";
+    sourceNode = null;
 }
 
 
 /*
- * RESET
+ * TIMER
  */
 
-function resetDecoder() {
+function updateTimer() {
 
-    symbolBuffer = [];
+    if (
+        !isPlaying ||
+        !audioContext
+    ) {
+        return;
+    }
 
-    detectedHeader = false;
 
-    expectedFileSize = 0;
-    expectedCRC = 0;
+    const elapsed =
+        audioContext.currentTime -
+        transmissionStart;
 
-    fileName = "";
-    mimeType = "";
 
-    payloadBits = [];
+    const total =
+        audioBuffer.duration;
 
-    receivedBytes = [];
 
-    sampleBuffer = [];
+    const progress =
+        Math.min(
+            1,
+            elapsed / total
+        );
 
-    lastPreviewUpdate = 0;
 
-    fileNameElement.textContent =
-        "Waiting for SONICCRYPT...";
+    elapsedTime.textContent =
+        formatTime(elapsed);
 
-    receivedBytesElement.textContent =
-        "0 B";
 
-    expectedBytesElement.textContent =
-        "0 B";
+    remainingTime.textContent =
+        formatTime(
+            Math.max(
+                0,
+                total - elapsed
+            )
+        );
 
-    receiveSpeed.textContent =
-        "0 B/s";
 
-    receivedText.textContent =
-        "0 B / 0 B";
+    progressFill.style.width =
+        `${progress * 100}%`;
 
-    receivePercent.textContent =
-        "0%";
 
-    receiveFill.style.width =
-        "0%";
+    progressPercent.textContent =
+        `${Math.floor(
+            progress * 100
+        )}%`;
 
-    receivedImage.style.display =
-        "none";
 
-    receivedImage.removeAttribute("src");
+    animationFrame =
+        requestAnimationFrame(
+            updateTimer
+        );
+}
 
-    downloadButton.style.display =
-        "none";
 
-    previewStatus.textContent =
-        "Waiting for data...";
+/*
+ * WAVEFORM
+ */
+
+function drawWaveform(buffer) {
+
+    canvas.width =
+        canvas.clientWidth *
+        window.devicePixelRatio;
+
+    canvas.height =
+        canvas.clientHeight *
+        window.devicePixelRatio;
+
+
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+
+    const data =
+        buffer.getChannelData(0);
+
+
+    const center =
+        canvas.height / 2;
+
+
+    const step =
+        Math.max(
+            1,
+            Math.floor(
+                data.length /
+                canvas.width
+            )
+        );
+
+
+    ctx.beginPath();
+
+
+    for (
+        let x = 0;
+        x < canvas.width;
+        x++
+    ) {
+
+        const value =
+            data[x * step] || 0;
+
+
+        const y =
+            center +
+            value *
+            center *
+            0.85;
+
+
+        if (x === 0) {
+
+            ctx.moveTo(
+                x,
+                y
+            );
+
+        } else {
+
+            ctx.lineTo(
+                x,
+                y
+            );
+        }
+    }
+
+
+    ctx.strokeStyle =
+        "#4aa8ff";
+
+    ctx.lineWidth = 1;
+
+    ctx.stroke();
 }
 
 
@@ -1186,22 +1221,27 @@ function crc32(bytes) {
     let crc =
         0xffffffff;
 
+
     for (const byte of bytes) {
 
         crc ^= byte;
 
-        for (let i = 0; i < 8; i++) {
+
+        for (
+            let i = 0;
+            i < 8;
+            i++
+        ) {
 
             crc =
-                (
-                    crc >>> 1
-                ) ^
+                (crc >>> 1) ^
                 (
                     -(crc & 1) &
                     0xedb88320
                 );
         }
     }
+
 
     return (
         crc ^
@@ -1211,7 +1251,61 @@ function crc32(bytes) {
 
 
 /*
- * FORMAT
+ * FORMAT TIME
+ */
+
+function formatTime(seconds) {
+
+    seconds =
+        Math.max(
+            0,
+            Math.floor(seconds)
+        );
+
+
+    const hours =
+        Math.floor(
+            seconds / 3600
+        );
+
+
+    const minutes =
+        Math.floor(
+            (seconds % 3600) / 60
+        );
+
+
+    const secs =
+        seconds % 60;
+
+
+    if (hours > 0) {
+
+        return (
+            String(hours)
+                .padStart(2, "0") +
+            ":" +
+            String(minutes)
+                .padStart(2, "0") +
+            ":" +
+            String(secs)
+                .padStart(2, "0")
+        );
+    }
+
+
+    return (
+        String(minutes)
+            .padStart(2, "0") +
+        ":" +
+        String(secs)
+            .padStart(2, "0")
+    );
+}
+
+
+/*
+ * FORMAT BYTES
  */
 
 function formatBytes(bytes) {
@@ -1220,19 +1314,21 @@ function formatBytes(bytes) {
         return "0 B";
     }
 
-    const units =
-        [
-            "B",
-            "KB",
-            "MB",
-            "GB"
-        ];
+
+    const units = [
+        "B",
+        "KB",
+        "MB",
+        "GB"
+    ];
+
 
     const index =
         Math.floor(
             Math.log(bytes) /
             Math.log(1024)
         );
+
 
     return (
         (
@@ -1242,10 +1338,13 @@ function formatBytes(bytes) {
                 index
             )
         ).toFixed(
-            index === 0 ? 0 : 2
+            index === 0
+                ? 0
+                : 2
         )
-        + " "
-        + units[index]
+        +
+        " " +
+        units[index]
     );
 }
 
@@ -1254,14 +1353,24 @@ function formatBytes(bytes) {
  * INITIAL
  */
 
+playButton.disabled = true;
+pauseButton.disabled = true;
+stopButton.disabled = true;
+
+
+turboButton.classList.add(
+    "active"
+);
+
+
 log(
-    "SONICCRYPT receiver initialized."
+    "SONICCRYPT TURBO transmitter initialized."
 );
 
 log(
-    "16-FSK decoder ready."
+    "16-FSK: 1000-4000 Hz."
 );
 
 log(
-    "Press START LISTENING."
+    "Synchronization preamble enabled."
 );
