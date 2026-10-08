@@ -3,7 +3,7 @@
 SONICCRYPT RECEIVER
 ============================================================
 
-Compatible with the current SONICCRYPT sender.
+Compatible with SONICCRYPT 16-FSK sender.
 
 16-FSK:
 
@@ -24,12 +24,10 @@ D  = 3600 Hz
 E  = 3800 Hz
 F  = 4000 Hz
 
-Sender modes:
-
 TURBO    = 3 ms / symbol
 RELIABLE = 6 ms / symbol
 
-Header:
+HEADER:
 
 SCX1
 version
@@ -38,7 +36,7 @@ MIME type
 file size
 CRC32
 
-Payload:
+PAYLOAD:
 
 5 random bits + 8 data bits
 
@@ -58,9 +56,7 @@ const FREQUENCIES =
 
 
 const SYMBOL_DURATIONS = {
-
     turbo: 0.003,
-
     reliable: 0.006
 };
 
@@ -74,8 +70,12 @@ const SYMBOL_DURATIONS = {
  * 1 = 0x31 -> 3,1
  */
 
-const MAGIC =
-    [5, 3, 4, 3, 5, 8, 3, 1];
+const MAGIC = [
+    5, 3,
+    4, 3,
+    5, 8,
+    3, 1
+];
 
 
 /* =========================================================
@@ -83,13 +83,9 @@ const MAGIC =
 ========================================================= */
 
 let audioContext = null;
-
 let microphone = null;
-
 let processor = null;
-
 let silentGain = null;
-
 let mediaStream = null;
 
 let actualSampleRate = 48000;
@@ -98,6 +94,11 @@ let actualSampleRate = 48000;
 /* =========================================================
    AUDIO BUFFER
 ========================================================= */
+
+/*
+ * Float32Array chunks are stored here instead of constantly
+ * creating enormous arrays.
+ */
 
 let sampleBuffer = [];
 
@@ -109,22 +110,29 @@ let decodePosition = 0;
 ========================================================= */
 
 let listening = false;
-
 let synchronized = false;
 
 let detectedMode = null;
-
 let symbolDuration = 0;
+
+let synchronizationLocked = false;
 
 
 /*
- * We only attempt synchronization periodically.
- *
- * This prevents the browser from constantly
- * performing expensive searches.
+ * We do not search every audio callback.
  */
 
 let lastSyncAttempt = 0;
+
+
+/*
+ * Search interval.
+ *
+ * 120 ms is fast enough to catch a transmission quickly
+ * without hammering the CPU.
+ */
+
+const SYNC_INTERVAL = 120;
 
 
 /* =========================================================
@@ -148,11 +156,9 @@ let payloadBits = [];
 let detectedHeader = false;
 
 let expectedFileSize = 0;
-
 let expectedCRC = 0;
 
 let fileName = "";
-
 let mimeType = "";
 
 let receivedBytes = [];
@@ -165,8 +171,14 @@ let receivedBytes = [];
 let receiveStartTime = 0;
 
 let lastPreviewUpdate = 0;
-
 let lastUiUpdate = 0;
+
+
+/* =========================================================
+   LIVE OBJECT URL
+========================================================= */
+
+let livePreviewUrl = null;
 
 
 /* =========================================================
@@ -287,6 +299,11 @@ const logElement =
 
 function log(message) {
 
+    if (!logElement) {
+        return;
+    }
+
+
     const entry =
         document.createElement(
             "div"
@@ -309,13 +326,11 @@ function log(message) {
 
 
     /*
-     * Don't constantly force scrolling
-     * while decoding.
+     * Keep the log from becoming enormous.
      */
 
-    if (
-        logElement.children.length >
-        100
+    while (
+        logElement.children.length > 100
     ) {
 
         logElement.removeChild(
@@ -346,32 +361,40 @@ async function startListening() {
 
     try {
 
-        mediaStream =
-            await navigator
-                .mediaDevices
-                .getUserMedia({
+        if (
+            !navigator.mediaDevices ||
+            !navigator.mediaDevices.getUserMedia
+        ) {
 
-                    audio: {
-
-                        channelCount: 1,
-
-                        echoCancellation:
-                            false,
-
-                        noiseSuppression:
-                            false,
-
-                        autoGainControl:
-                            false
-                    }
-                });
+            throw new Error(
+                "This browser does not support microphone access."
+            );
+        }
 
 
         /*
-         * Do NOT force a sample rate.
-         *
-         * The browser decides what the
-         * microphone actually uses.
+         * Ask for the microphone.
+         */
+
+        mediaStream =
+            await navigator.mediaDevices.getUserMedia({
+
+                audio: {
+
+                    channelCount: 1,
+
+                    echoCancellation: false,
+
+                    noiseSuppression: false,
+
+                    autoGainControl: false
+                }
+            });
+
+
+        /*
+         * Let the browser choose the microphone's
+         * native/available sample rate.
          */
 
         audioContext =
@@ -385,6 +408,10 @@ async function startListening() {
             audioContext.sampleRate;
 
 
+        /*
+         * Create microphone source.
+         */
+
         microphone =
             audioContext
                 .createMediaStreamSource(
@@ -393,10 +420,8 @@ async function startListening() {
 
 
         /*
-         * 4096 is intentionally kept here.
-         *
-         * The actual decoder does NOT analyze
-         * all 4096 samples repeatedly.
+         * ScriptProcessor is used for broad browser
+         * compatibility.
          */
 
         processor =
@@ -409,11 +434,10 @@ async function startListening() {
 
 
         /*
-         * Zero-gain output.
+         * ZERO gain.
          *
-         * This keeps ScriptProcessor alive
-         * without feeding the microphone into
-         * the speakers.
+         * This keeps the ScriptProcessor active without
+         * playing the microphone through the speakers.
          */
 
         silentGain =
@@ -472,12 +496,17 @@ async function startListening() {
 
 
         log(
-            `Microphone rate: ${actualSampleRate} Hz`
+            `Microphone sample rate: ${actualSampleRate} Hz`
         );
 
 
         log(
-            "Waiting for SONICCRYPT SCX1..."
+            "Receiver is listening for SONICCRYPT."
+        );
+
+
+        log(
+            "Searching for SCX1 synchronization..."
         );
 
 
@@ -494,6 +523,14 @@ async function startListening() {
             "Microphone error: " +
             error.message
         );
+
+
+        /*
+         * Clean up anything that was created
+         * before the error.
+         */
+
+        cleanupAudio();
     }
 }
 
@@ -508,55 +545,15 @@ stopButton.onclick =
 
 function stopListening() {
 
+    if (!listening) {
+        return;
+    }
+
+
     listening = false;
 
 
-    if (processor) {
-
-        processor.disconnect();
-
-        processor.onaudioprocess =
-            null;
-
-        processor = null;
-    }
-
-
-    if (microphone) {
-
-        microphone.disconnect();
-
-        microphone = null;
-    }
-
-
-    if (silentGain) {
-
-        silentGain.disconnect();
-
-        silentGain = null;
-    }
-
-
-    if (mediaStream) {
-
-        mediaStream
-            .getTracks()
-            .forEach(
-                track =>
-                    track.stop()
-            );
-
-        mediaStream = null;
-    }
-
-
-    if (audioContext) {
-
-        audioContext.close();
-
-        audioContext = null;
-    }
+    cleanupAudio();
 
 
     statusElement.textContent =
@@ -578,6 +575,68 @@ function stopListening() {
 
 
 /* =========================================================
+   AUDIO CLEANUP
+========================================================= */
+
+function cleanupAudio() {
+
+    if (processor) {
+
+        processor.onaudioprocess =
+            null;
+
+        try {
+            processor.disconnect();
+        } catch {}
+
+        processor = null;
+    }
+
+
+    if (microphone) {
+
+        try {
+            microphone.disconnect();
+        } catch {}
+
+        microphone = null;
+    }
+
+
+    if (silentGain) {
+
+        try {
+            silentGain.disconnect();
+        } catch {}
+
+        silentGain = null;
+    }
+
+
+    if (mediaStream) {
+
+        mediaStream
+            .getTracks()
+            .forEach(
+                track => track.stop()
+            );
+
+        mediaStream = null;
+    }
+
+
+    if (audioContext) {
+
+        try {
+            audioContext.close();
+        } catch {}
+
+        audioContext = null;
+    }
+}
+
+
+/* =========================================================
    AUDIO PROCESSING
 ========================================================= */
 
@@ -594,7 +653,7 @@ function processAudio(event) {
 
 
     /*
-     * Update signal meter cheaply.
+     * Signal meter.
      */
 
     updateRawSignal(
@@ -603,7 +662,7 @@ function processAudio(event) {
 
 
     /*
-     * Copy the new samples.
+     * Copy microphone samples.
      */
 
     for (
@@ -619,9 +678,8 @@ function processAudio(event) {
 
 
     /*
-     * BEFORE LOCK
-     *
-     * Try to find SCX1.
+     * Before synchronization:
+     * search for SCX1.
      */
 
     if (!synchronized) {
@@ -633,9 +691,8 @@ function processAudio(event) {
 
 
     /*
-     * AFTER LOCK
-     *
-     * Decode one symbol at a time.
+     * Once synchronized:
+     * decode complete symbols.
      */
 
     decodeLockedAudio();
@@ -650,12 +707,8 @@ function updateRawSignal(
     samples
 ) {
 
-    let sum =
-        0;
-
-
-    let peak =
-        0;
+    let sum = 0;
+    let peak = 0;
 
 
     for (
@@ -669,8 +722,7 @@ function updateRawSignal(
 
 
         sum +=
-            value *
-            value;
+            value * value;
 
 
         const absolute =
@@ -678,8 +730,7 @@ function updateRawSignal(
 
 
         if (
-            absolute >
-            peak
+            absolute > peak
         ) {
 
             peak =
@@ -691,27 +742,28 @@ function updateRawSignal(
     const rms =
         Math.sqrt(
             sum /
-            samples.length
+            Math.max(
+                1,
+                samples.length
+            )
         );
 
 
     /*
-     * Convert microphone level to
-     * a readable percentage.
+     * This is only a visual meter.
+     *
+     * It is NOT used as the actual decoder
+     * threshold.
      */
 
     let percentage =
-        rms * 300;
+        rms * 450;
 
-
-    /*
-     * Peak helps quiet signals show up.
-     */
 
     percentage =
         Math.max(
             percentage,
-            peak * 100
+            peak * 130
         );
 
 
@@ -738,15 +790,9 @@ function trySynchronization() {
         performance.now();
 
 
-    /*
-     * Don't run synchronization every
-     * microphone callback.
-     */
-
     if (
-        now -
-        lastSyncAttempt <
-        300
+        now - lastSyncAttempt <
+        SYNC_INTERVAL
     ) {
 
         trimSearchBuffer();
@@ -760,19 +806,34 @@ function trySynchronization() {
 
 
     /*
-     * Try both sender modes.
+     * Need enough audio before searching.
      */
 
-    const turboFound =
+    if (
+        sampleBuffer.length <
+        Math.floor(
+            actualSampleRate * 0.035
+        )
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Try TURBO first.
+     */
+
+    const turbo =
         searchForMagic(
             SYMBOL_DURATIONS.turbo
         );
 
 
-    if (turboFound) {
+    if (turbo) {
 
         lockReceiver(
-            turboFound,
+            turbo,
             "turbo"
         );
 
@@ -780,16 +841,20 @@ function trySynchronization() {
     }
 
 
-    const reliableFound =
+    /*
+     * Try RELIABLE.
+     */
+
+    const reliable =
         searchForMagic(
             SYMBOL_DURATIONS.reliable
         );
 
 
-    if (reliableFound) {
+    if (reliable) {
 
         lockReceiver(
-            reliableFound,
+            reliable,
             "reliable"
         );
 
@@ -814,20 +879,16 @@ function searchForMagic(
         actualSampleRate;
 
 
-    const required =
+    const requiredSamples =
         Math.ceil(
             samplesPerSymbol *
             MAGIC.length
         );
 
 
-    /*
-     * Need a complete SCX1 sequence.
-     */
-
     if (
         sampleBuffer.length <
-        required
+        requiredSamples
     ) {
 
         return null;
@@ -835,75 +896,135 @@ function searchForMagic(
 
 
     /*
-     * Only search the newest portion
-     * of the buffer.
+     * Only search the most recent
+     * 350 milliseconds.
      */
 
-    const searchLimit =
-        Math.min(
-            sampleBuffer.length -
-            required,
-
-            Math.floor(
-                actualSampleRate *
-                0.25
-            )
+    const maxSearchSamples =
+        Math.floor(
+            actualSampleRate *
+            0.35
         );
 
 
+    const startSearch =
+        Math.max(
+            0,
+            sampleBuffer.length -
+            maxSearchSamples -
+            requiredSamples
+        );
+
+
+    const endSearch =
+        sampleBuffer.length -
+        requiredSamples;
+
+
     /*
-     * Instead of checking every sample,
-     * check every 2 samples.
+     * We do not need single-sample
+     * precision initially.
      *
-     * This dramatically reduces CPU use.
+     * Search every 4 samples.
      */
 
+    const step = 4;
+
+
+    let bestResult = null;
+
+
     for (
-        let offset = 0;
-        offset <= searchLimit;
-        offset += 2
+        let offset = startSearch;
+        offset <= endSearch;
+        offset += step
     ) {
 
-        const score =
-            scoreMagic(
+        const result =
+            scoreMagicAtOffset(
                 offset,
                 samplesPerSymbol
             );
 
 
+        if (!result) {
+            continue;
+        }
+
+
+        /*
+         * Require a strong match.
+         */
+
         if (
-            score >=
-            0.78
+            result.score >= 0.72
         ) {
 
-            return {
-                offset,
-                samplesPerSymbol,
-                score
-            };
+            /*
+             * Keep the best candidate instead
+             * of immediately accepting the first.
+             */
+
+            if (
+                !bestResult ||
+                result.score >
+                bestResult.score
+            ) {
+
+                bestResult = {
+                    offset,
+                    samplesPerSymbol,
+                    score: result.score
+                };
+            }
         }
     }
 
 
-    return null;
+    if (!bestResult) {
+        return null;
+    }
+
+
+    /*
+     * Refine timing around the best position.
+     *
+     * This fixes the problem where the initial
+     * search was a few samples off.
+     */
+
+    const refined =
+        refineSynchronization(
+            bestResult.offset,
+            samplesPerSymbol
+        );
+
+
+    if (refined) {
+
+        return {
+            offset: refined.offset,
+            samplesPerSymbol,
+            score: refined.score
+        };
+    }
+
+
+    return bestResult;
 }
 
 
 /* =========================================================
-   SCORE SCX1
+   SCORE MAGIC
 ========================================================= */
 
-function scoreMagic(
+function scoreMagicAtOffset(
     offset,
     samplesPerSymbol
 ) {
 
-    let matches =
-        0;
-
-
-    let confidence =
-        0;
+    let matches = 0;
+    let totalConfidence = 0;
 
 
     for (
@@ -912,7 +1033,15 @@ function scoreMagic(
         i++
     ) {
 
-        const start =
+        /*
+         * Analyze only the middle
+         * 70% of the symbol.
+         *
+         * This avoids the transition between
+         * adjacent frequencies.
+         */
+
+        const symbolStart =
             offset +
             Math.round(
                 i *
@@ -920,7 +1049,7 @@ function scoreMagic(
             );
 
 
-        const end =
+        const symbolEnd =
             offset +
             Math.round(
                 (i + 1) *
@@ -928,31 +1057,44 @@ function scoreMagic(
             );
 
 
-        if (
-            end >
-            sampleBuffer.length
-        ) {
-
-            return 0;
-        }
+        const length =
+            symbolEnd -
+            symbolStart;
 
 
-        const samples =
-            sampleBuffer.slice(
-                start,
-                end
+        const innerStart =
+            symbolStart +
+            Math.round(
+                length * 0.15
             );
 
 
+        const innerEnd =
+            symbolEnd -
+            Math.round(
+                length * 0.15
+            );
+
+
+        if (
+            innerEnd <= innerStart ||
+            innerEnd > sampleBuffer.length
+        ) {
+
+            return null;
+        }
+
+
         const detected =
-            detectFrequency(
-                samples
+            detectFrequencyRange(
+                sampleBuffer,
+                innerStart,
+                innerEnd
             );
 
 
         if (!detected) {
-
-            return 0;
+            return null;
         }
 
 
@@ -965,7 +1107,7 @@ function scoreMagic(
         }
 
 
-        confidence +=
+        totalConfidence +=
             detected.confidence;
     }
 
@@ -975,15 +1117,100 @@ function scoreMagic(
         MAGIC.length;
 
 
-    const averageConfidence =
-        confidence /
+    const confidence =
+        totalConfidence /
         MAGIC.length;
 
 
-    return (
-        accuracy * 0.9 +
-        averageConfidence * 0.1
-    );
+    /*
+     * Matching symbols are more important
+     * than raw confidence.
+     */
+
+    const score =
+        accuracy * 0.80 +
+        confidence * 0.20;
+
+
+    return {
+        score,
+        accuracy,
+        confidence
+    };
+}
+
+
+/* =========================================================
+   REFINE SYNCHRONIZATION
+========================================================= */
+
+function refineSynchronization(
+    centerOffset,
+    samplesPerSymbol
+) {
+
+    let best = null;
+
+
+    /*
+     * Check +/- 12 samples around
+     * the original location.
+     */
+
+    for (
+        let adjustment = -12;
+        adjustment <= 12;
+        adjustment++
+    ) {
+
+        const offset =
+            centerOffset +
+            adjustment;
+
+
+        if (
+            offset < 0
+        ) {
+            continue;
+        }
+
+
+        const result =
+            scoreMagicAtOffset(
+                offset,
+                samplesPerSymbol
+            );
+
+
+        if (!result) {
+            continue;
+        }
+
+
+        if (
+            !best ||
+            result.score >
+            best.score
+        ) {
+
+            best = {
+                offset,
+                score: result.score
+            };
+        }
+    }
+
+
+    if (
+        best &&
+        best.score >= 0.72
+    ) {
+
+        return best;
+    }
+
+
+    return null;
 }
 
 
@@ -996,8 +1223,8 @@ function lockReceiver(
     mode
 ) {
 
-    synchronized =
-        true;
+    synchronized = true;
+    synchronizationLocked = true;
 
 
     detectedMode =
@@ -1005,18 +1232,16 @@ function lockReceiver(
 
 
     symbolDuration =
-        mode === "turbo"
-            ? SYMBOL_DURATIONS.turbo
-            : SYMBOL_DURATIONS.reliable;
+        SYMBOL_DURATIONS[mode];
 
 
     const samplesPerSymbol =
-        result.samplesPerSymbol;
+        symbolDuration *
+        actualSampleRate;
 
 
     /*
-     * Remove audio before and including
-     * the SCX1 sequence.
+     * Remove everything through SCX1.
      */
 
     const removeCount =
@@ -1033,12 +1258,12 @@ function lockReceiver(
         );
 
 
-    decodePosition =
-        0;
+    decodePosition = 0;
 
 
     /*
-     * Reconstruct SCX1 in symbol form.
+     * Reconstruct the SCX1 header
+     * so the normal header decoder sees it.
      */
 
     symbolBuffer =
@@ -1070,13 +1295,23 @@ function lockReceiver(
 
 
     log(
+        `SYNC CONFIDENCE: ${
+            (
+                result.score *
+                100
+            ).toFixed(1)
+        }%`
+    );
+
+
+    log(
         "Receiving header..."
     );
 
 
     /*
-     * Decode anything already
-     * sitting in the buffer.
+     * Decode any complete symbols already
+     * available.
      */
 
     decodeLockedAudio();
@@ -1090,14 +1325,13 @@ function lockReceiver(
 function trimSearchBuffer() {
 
     /*
-     * Keep only the most recent
-     * 300 milliseconds.
+     * Keep the newest 400 ms.
      */
 
     const maximum =
         Math.floor(
             actualSampleRate *
-            0.3
+            0.4
         );
 
 
@@ -1120,13 +1354,23 @@ function trimSearchBuffer() {
 
 function decodeLockedAudio() {
 
+    if (
+        !synchronized ||
+        !symbolDuration
+    ) {
+
+        return;
+    }
+
+
     const samplesPerSymbol =
         symbolDuration *
         actualSampleRate;
 
 
     /*
-     * Don't decode partial symbols.
+     * Decode as many complete symbols
+     * as possible.
      */
 
     while (
@@ -1148,16 +1392,31 @@ function decodeLockedAudio() {
             );
 
 
-        const samples =
-            sampleBuffer.slice(
-                start,
-                end
+        /*
+         * Analyze the middle 70%.
+         */
+
+        const innerStart =
+            start +
+            Math.round(
+                (end - start) *
+                0.15
+            );
+
+
+        const innerEnd =
+            end -
+            Math.round(
+                (end - start) *
+                0.15
             );
 
 
         const result =
-            detectFrequency(
-                samples
+            detectFrequencyRange(
+                sampleBuffer,
+                innerStart,
+                innerEnd
             );
 
 
@@ -1171,11 +1430,6 @@ function decodeLockedAudio() {
             frequencyElement.textContent =
                 `${result.frequency} Hz`;
 
-
-            /*
-             * Only show confidence when
-             * actually decoding a tone.
-             */
 
             updateSignal(
                 result.confidence *
@@ -1193,12 +1447,12 @@ function decodeLockedAudio() {
 
 
     /*
-     * Periodically remove consumed samples.
+     * Periodically discard consumed samples.
      */
 
     if (
         decodePosition >
-        8192
+        16384
     ) {
 
         const consumed =
@@ -1220,16 +1474,21 @@ function decodeLockedAudio() {
 
 
 /* =========================================================
-   16-FSK DETECTOR
+   FREQUENCY DETECTOR
 ========================================================= */
 
-function detectFrequency(
-    samples
+function detectFrequencyRange(
+    buffer,
+    start,
+    end
 ) {
 
+    const length =
+        end - start;
+
+
     if (
-        samples.length <
-        16
+        length < 16
     ) {
 
         return null;
@@ -1237,51 +1496,56 @@ function detectFrequency(
 
 
     /*
-     * Calculate signal energy first.
+     * Calculate total signal energy.
      */
 
-    let energy =
-        0;
+    let energy = 0;
 
 
     for (
-        let i = 0;
-        i < samples.length;
+        let i = start;
+        i < end;
         i++
     ) {
 
+        const value =
+            buffer[i];
+
+
         energy +=
-            samples[i] *
-            samples[i];
+            value * value;
     }
 
 
+    const rms =
+        Math.sqrt(
+            energy /
+            length
+        );
+
+
+    /*
+     * Ignore silence / extremely weak
+     * microphone noise.
+     */
+
     if (
-        energy <
-        0.00001
+        rms < 0.0015
     ) {
 
         return null;
     }
 
 
-    let bestSymbol =
-        -1;
-
-
-    let bestPower =
-        -Infinity;
-
+    let bestSymbol = -1;
+    let bestPower = -Infinity;
 
     let secondPower =
         -Infinity;
 
 
     /*
-     * Test the 16 possible frequencies.
-     *
-     * This is performed ONLY ONCE per
-     * decoded symbol after synchronization.
+     * Test all 16 FSK frequencies.
      */
 
     for (
@@ -1291,11 +1555,11 @@ function detectFrequency(
     ) {
 
         const power =
-            frequencyPower(
-                samples,
-                FREQUENCIES[
-                    symbol
-                ]
+            goertzelPower(
+                buffer,
+                start,
+                end,
+                FREQUENCIES[symbol]
             );
 
 
@@ -1327,8 +1591,7 @@ function detectFrequency(
 
 
     if (
-        bestSymbol ===
-        -1
+        bestSymbol < 0
     ) {
 
         return null;
@@ -1336,30 +1599,48 @@ function detectFrequency(
 
 
     /*
-     * How much stronger is the winning
-     * frequency than the second-best?
+     * Compare winning frequency against
+     * the runner-up.
      */
 
     const dominance =
         bestPower /
         (
             secondPower +
-            0.000001
+            0.0000001
         );
 
 
-    const confidence =
+    let confidence =
+        (
+            dominance -
+            1
+        ) / 2;
+
+
+    confidence =
         Math.max(
             0,
             Math.min(
                 1,
-                (
-                    dominance -
-                    1
-                ) /
-                1.5
+                confidence
             )
         );
+
+
+    /*
+     * Reject extremely ambiguous signals.
+     *
+     * During normal decoding we want
+     * reasonably clean tones.
+     */
+
+    if (
+        confidence < 0.08
+    ) {
+
+        return null;
+    }
 
 
     return {
@@ -1378,69 +1659,96 @@ function detectFrequency(
 
 
 /* =========================================================
-   FREQUENCY POWER
+   GOERTZEL FREQUENCY DETECTION
 ========================================================= */
 
-function frequencyPower(
-    samples,
+function goertzelPower(
+    buffer,
+    start,
+    end,
     frequency
 ) {
 
-    let cosine =
-        0;
-
-
-    let sine =
-        0;
-
-
     const length =
-        samples.length;
+        end - start;
 
 
     /*
-     * Direct correlation.
-     *
-     * Much simpler than repeatedly running
-     * large searches over the entire buffer.
+     * Goertzel is significantly cheaper
+     * than calculating sine/cosine for
+     * every sample and every frequency.
      */
 
+    const k =
+        Math.round(
+            (
+                length *
+                frequency
+            ) /
+            actualSampleRate
+        );
+
+
+    const targetFrequency =
+        (
+            k *
+            actualSampleRate
+        ) /
+        length;
+
+
+    const omega =
+        (
+            2 *
+            Math.PI *
+            targetFrequency
+        ) /
+        actualSampleRate;
+
+
+    const coefficient =
+        2 *
+        Math.cos(
+            omega
+        );
+
+
+    let s1 = 0;
+    let s2 = 0;
+
+
     for (
-        let i = 0;
-        i < length;
+        let i = start;
+        i < end;
         i++
     ) {
 
-        const phase =
-            (
-                2 *
-                Math.PI *
-                frequency *
-                i
-            ) /
-            actualSampleRate;
+        const sample =
+            buffer[i];
 
 
-        cosine +=
-            samples[i] *
-            Math.cos(
-                phase
-            );
+        const s =
+            sample +
+            coefficient *
+            s1 -
+            s2;
 
 
-        sine +=
-            samples[i] *
-            Math.sin(
-                phase
-            );
+        s2 =
+            s1;
+
+
+        s1 =
+            s;
     }
 
 
     return (
-        cosine *
-        cosine +
-        sine *
-        sine
+        s1 * s1 +
+        s2 * s2 -
+        coefficient *
+        s1 *
+        s2
     );
 }
 
@@ -1452,6 +1760,15 @@ function frequencyPower(
 function updateSignal(
     value
 ) {
+
+    if (
+        !signalStrength ||
+        !signalFill
+    ) {
+
+        return;
+    }
+
 
     const percentage =
         Math.round(
@@ -1480,9 +1797,12 @@ function updateSignal(
 
 function decodeSymbols() {
 
-    symbolsReceived.textContent =
-        symbolBuffer.length
-            .toLocaleString();
+    if (symbolsReceived) {
+
+        symbolsReceived.textContent =
+            symbolBuffer.length
+                .toLocaleString();
+    }
 
 
     /*
@@ -1513,11 +1833,6 @@ function decodeSymbols() {
 
 function parseHeader() {
 
-    /*
-     * Convert the symbols currently
-     * available into bytes.
-     */
-
     const bytes =
         symbolsToBytes(
             symbolBuffer
@@ -1529,7 +1844,7 @@ function parseHeader() {
      *
      * SCX1
      * version
-     * name length
+     * filename length
      */
 
     if (
@@ -1553,9 +1868,10 @@ function parseHeader() {
     ) {
 
         /*
-         * This should never happen after
-         * synchronization, but if it does,
-         * don't crash the receiver.
+         * Something went wrong after
+         * synchronization.
+         *
+         * Do not crash.
          */
 
         return;
@@ -1578,8 +1894,7 @@ function parseHeader() {
     }
 
 
-    let position =
-        5;
+    let position = 5;
 
 
     /*
@@ -1599,18 +1914,27 @@ function parseHeader() {
         (
             bytes[position] << 8
         ) |
-        bytes[
-            position + 1
-        ];
+        bytes[position + 1];
 
 
-    position +=
-        2;
+    position += 2;
 
 
     /*
-     * Wait until the complete filename
-     * has arrived.
+     * Sanity check.
+     */
+
+    if (
+        nameLength < 0 ||
+        nameLength > 65535
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Wait for complete filename.
      */
 
     if (
@@ -1624,17 +1948,25 @@ function parseHeader() {
     }
 
 
-    fileName =
-        new TextDecoder()
-            .decode(
-                new Uint8Array(
-                    bytes.slice(
-                        position,
-                        position +
-                        nameLength
+    try {
+
+        fileName =
+            new TextDecoder()
+                .decode(
+                    new Uint8Array(
+                        bytes.slice(
+                            position,
+                            position +
+                            nameLength
+                        )
                     )
-                )
-            );
+                );
+
+    } catch {
+
+        fileName =
+            "soniccrypt-file";
+    }
 
 
     position +=
@@ -1649,17 +1981,18 @@ function parseHeader() {
         (
             bytes[position] << 8
         ) |
-        bytes[
-            position + 1
-        ];
+        bytes[position + 1];
 
 
-    position +=
-        2;
+    position += 2;
 
 
     /*
-     * Need MIME + size + CRC.
+     * Need:
+     *
+     * MIME
+     * 4 byte file size
+     * 4 byte CRC
      */
 
     if (
@@ -1673,21 +2006,25 @@ function parseHeader() {
     }
 
 
-    /*
-     * MIME type.
-     */
+    try {
 
-    mimeType =
-        new TextDecoder()
-            .decode(
-                new Uint8Array(
-                    bytes.slice(
-                        position,
-                        position +
-                        mimeLength
+        mimeType =
+            new TextDecoder()
+                .decode(
+                    new Uint8Array(
+                        bytes.slice(
+                            position,
+                            position +
+                            mimeLength
+                        )
                     )
-                )
-            );
+                );
+
+    } catch {
+
+        mimeType =
+            "application/octet-stream";
+    }
 
 
     position +=
@@ -1701,20 +2038,19 @@ function parseHeader() {
     expectedFileSize =
         (
             bytes[position] *
-                0x1000000 +
+            0x1000000 +
 
             bytes[position + 1] *
-                0x10000 +
+            0x10000 +
 
             bytes[position + 2] *
-                0x100 +
+            0x100 +
 
             bytes[position + 3]
         ) >>> 0;
 
 
-    position +=
-        4;
+    position += 4;
 
 
     /*
@@ -1724,26 +2060,42 @@ function parseHeader() {
     expectedCRC =
         (
             bytes[position] *
-                0x1000000 +
+            0x1000000 +
 
             bytes[position + 1] *
-                0x10000 +
+            0x10000 +
 
             bytes[position + 2] *
-                0x100 +
+            0x100 +
 
             bytes[position + 3]
         ) >>> 0;
 
 
-    position +=
-        4;
+    position += 4;
+
+
+    /*
+     * Sanity check.
+     */
+
+    if (
+        expectedFileSize >
+        0x7fffffff
+    ) {
+
+        log(
+            "Invalid file size in header."
+        );
+
+        return;
+    }
 
 
     /*
      * Header is complete.
      *
-     * Every byte = two 16-FSK symbols.
+     * Every byte uses two 16-FSK symbols.
      */
 
     const headerSymbols =
@@ -1760,7 +2112,7 @@ function parseHeader() {
 
 
     /*
-     * Remove the header.
+     * Remove header symbols.
      */
 
     symbolBuffer =
@@ -1777,18 +2129,27 @@ function parseHeader() {
      * UI
      */
 
-    fileNameElement.textContent =
-        fileName;
+    if (fileNameElement) {
+
+        fileNameElement.textContent =
+            fileName;
+    }
 
 
-    expectedBytesElement.textContent =
-        formatBytes(
-            expectedFileSize
-        );
+    if (expectedBytesElement) {
+
+        expectedBytesElement.textContent =
+            formatBytes(
+                expectedFileSize
+            );
+    }
 
 
-    previewStatus.textContent =
-        "RECEIVING";
+    if (previewStatus) {
+
+        previewStatus.textContent =
+            "RECEIVING";
+    }
 
 
     log(
@@ -1826,8 +2187,8 @@ function parseHeader() {
 
 
     /*
-     * Immediately process payload
-     * symbols that are already available.
+     * Immediately decode payload symbols
+     * that arrived with the header.
      */
 
     decodePayload();
@@ -1842,8 +2203,7 @@ function symbolsToBytes(
     symbols
 ) {
 
-    const bytes =
-        [];
+    const bytes = [];
 
 
     for (
@@ -1858,9 +2218,7 @@ function symbolsToBytes(
             (
                 symbols[i] << 4
             ) |
-            symbols[
-                i + 1
-            ]
+            symbols[i + 1]
         );
     }
 
@@ -1876,14 +2234,8 @@ function symbolsToBytes(
 function decodePayload() {
 
     /*
-     * IMPORTANT:
-     *
-     * Do NOT create a new bit array here.
-     *
-     * The previous receiver lost partial
-     * 13-bit blocks between audio callbacks.
-     *
-     * We keep payloadBits globally.
+     * Convert each 16-FSK symbol into
+     * four bits.
      */
 
     for (
@@ -1905,28 +2257,27 @@ function decodePayload() {
 
 
     /*
-     * Those symbols have now been converted.
+     * These symbols have now been consumed.
      */
 
-    symbolBuffer =
-        [];
+    symbolBuffer = [];
 
 
     /*
      * Decode complete 13-bit blocks.
+     *
+     * [5 random bits][8 data bits]
      */
 
     while (
-        payloadBits.length >=
-        13
+        payloadBits.length >= 13
     ) {
 
-        let value =
-            0;
+        let value = 0;
 
 
         /*
-         * Skip the first 5 random bits.
+         * Skip first five random bits.
          */
 
         for (
@@ -1976,7 +2327,6 @@ function decodePayload() {
 
 
     updateReceiveProgress();
-
     updateLivePreview();
 }
 
@@ -2000,8 +2350,7 @@ function updateReceiveProgress() {
 
 
     /*
-     * Don't update the DOM hundreds
-     * of times per second.
+     * Don't update the DOM excessively.
      */
 
     if (
@@ -2029,38 +2378,48 @@ function updateReceiveProgress() {
         (
             count /
             expectedFileSize
-        ) *
-        100;
+        ) * 100;
 
 
-    receiveFill.style.width =
-        `${percent}%`;
+    if (receiveFill) {
+
+        receiveFill.style.width =
+            `${percent}%`;
+    }
 
 
-    receivePercent.textContent =
-        `${percent.toFixed(1)}%`;
+    if (receivePercent) {
+
+        receivePercent.textContent =
+            `${percent.toFixed(1)}%`;
+    }
 
 
-    receivedBytesElement.textContent =
-        formatBytes(
-            count
-        );
+    if (receivedBytesElement) {
+
+        receivedBytesElement.textContent =
+            formatBytes(
+                count
+            );
+    }
 
 
-    receivedText.textContent =
-        `${formatBytes(
-            count
-        )} / ${formatBytes(
-            expectedFileSize
-        )}`;
+    if (receivedText) {
+
+        receivedText.textContent =
+            `${formatBytes(
+                count
+            )} / ${formatBytes(
+                expectedFileSize
+            )}`;
+    }
 
 
     const elapsed =
         (
             now -
             receiveStartTime
-        ) /
-        1000;
+        ) / 1000;
 
 
     const speed =
@@ -2069,10 +2428,13 @@ function updateReceiveProgress() {
             : 0;
 
 
-    receiveSpeed.textContent =
-        `${formatBytes(
-            speed
-        )}/s`;
+    if (receiveSpeed) {
+
+        receiveSpeed.textContent =
+            `${formatBytes(
+                speed
+            )}/s`;
+    }
 }
 
 
@@ -2087,8 +2449,7 @@ function updateLivePreview() {
 
 
     /*
-     * Only try to update the image
-     * once every 750 ms.
+     * Don't rebuild the image constantly.
      */
 
     if (
@@ -2106,6 +2467,7 @@ function updateLivePreview() {
 
 
     if (
+        !mimeType ||
         !mimeType.startsWith(
             "image/"
         )
@@ -2114,6 +2476,11 @@ function updateLivePreview() {
         return;
     }
 
+
+    /*
+     * Very small incomplete images are
+     * not useful to decode.
+     */
 
     if (
         receivedBytes.length <
@@ -2153,16 +2520,36 @@ function updateLivePreview() {
         image.onload =
             () => {
 
-                receivedImage.src =
+                if (
+                    livePreviewUrl
+                ) {
+
+                    URL.revokeObjectURL(
+                        livePreviewUrl
+                    );
+                }
+
+
+                livePreviewUrl =
                     url;
 
 
-                receivedImage.style.display =
-                    "block";
+                if (receivedImage) {
+
+                    receivedImage.src =
+                        url;
 
 
-                previewStatus.textContent =
-                    "LIVE IMAGE PREVIEW";
+                    receivedImage.style.display =
+                        "block";
+                }
+
+
+                if (previewStatus) {
+
+                    previewStatus.textContent =
+                        "LIVE IMAGE PREVIEW";
+                }
             };
 
 
@@ -2180,8 +2567,10 @@ function updateLivePreview() {
 
 
     } catch {
+
         /*
-         * Keep receiving.
+         * Keep receiving even if the
+         * preview cannot be decoded yet.
          */
     }
 }
@@ -2202,15 +2591,15 @@ function finishReception() {
         );
 
 
+    /*
+     * Verify CRC32.
+     */
+
     const actualCRC =
         crc32(
             data
         );
 
-
-    /*
-     * Verify data.
-     */
 
     if (
         actualCRC !==
@@ -2221,8 +2610,11 @@ function finishReception() {
             "CHECKSUM ERROR";
 
 
-        previewStatus.textContent =
-            "Checksum failed.";
+        if (previewStatus) {
+
+            previewStatus.textContent =
+                "Checksum failed.";
+        }
 
 
         log(
@@ -2266,30 +2658,45 @@ function finishReception() {
         "TRANSMISSION COMPLETE";
 
 
-    receiveFill.style.width =
-        "100%";
+    if (receiveFill) {
+
+        receiveFill.style.width =
+            "100%";
+    }
 
 
-    receivePercent.textContent =
-        "100%";
+    if (receivePercent) {
+
+        receivePercent.textContent =
+            "100%";
+    }
 
 
-    receivedBytesElement.textContent =
-        formatBytes(
-            expectedFileSize
-        );
+    if (receivedBytesElement) {
+
+        receivedBytesElement.textContent =
+            formatBytes(
+                expectedFileSize
+            );
+    }
 
 
-    receivedText.textContent =
-        `${formatBytes(
-            expectedFileSize
-        )} / ${formatBytes(
-            expectedFileSize
-        )}`;
+    if (receivedText) {
+
+        receivedText.textContent =
+            `${formatBytes(
+                expectedFileSize
+            )} / ${formatBytes(
+                expectedFileSize
+            )}`;
+    }
 
 
-    previewStatus.textContent =
-        "FILE RECEIVED SUCCESSFULLY";
+    if (previewStatus) {
+
+        previewStatus.textContent =
+            "FILE RECEIVED SUCCESSFULLY";
+    }
 
 
     log(
@@ -2300,6 +2707,15 @@ function finishReception() {
     log(
         "CRC32 VERIFIED SUCCESSFULLY."
     );
+
+
+    /*
+     * Stop decoding once the file
+     * has completely arrived.
+     */
+
+    synchronized = false;
+    synchronizationLocked = false;
 
 
     const blob =
@@ -2320,7 +2736,7 @@ function finishReception() {
 
 
     /*
-     * Show image.
+     * Show final image.
      */
 
     if (
@@ -2329,12 +2745,28 @@ function finishReception() {
         )
     ) {
 
-        receivedImage.src =
-            url;
+        if (
+            livePreviewUrl
+        ) {
+
+            URL.revokeObjectURL(
+                livePreviewUrl
+            );
+
+            livePreviewUrl =
+                null;
+        }
 
 
-        receivedImage.style.display =
-            "block";
+        if (receivedImage) {
+
+            receivedImage.src =
+                url;
+
+
+            receivedImage.style.display =
+                "block";
+        }
     }
 
 
@@ -2342,17 +2774,20 @@ function finishReception() {
      * Download button.
      */
 
-    downloadButton.href =
-        url;
+    if (downloadButton) {
+
+        downloadButton.href =
+            url;
 
 
-    downloadButton.download =
-        fileName ||
-        "soniccrypt-file";
+        downloadButton.download =
+            fileName ||
+            "soniccrypt-file";
 
 
-    downloadButton.style.display =
-        "block";
+        downloadButton.style.display =
+            "block";
+    }
 }
 
 
@@ -2362,121 +2797,147 @@ function finishReception() {
 
 function resetReceiver() {
 
-    sampleBuffer =
-        [];
+    sampleBuffer = [];
+
+    decodePosition = 0;
+
+    symbolBuffer = [];
+
+    payloadBits = [];
+
+    receivedBytes = [];
 
 
-    decodePosition =
-        0;
+    synchronized = false;
+
+    synchronizationLocked = false;
+
+    detectedMode = null;
+
+    symbolDuration = 0;
 
 
-    symbolBuffer =
-        [];
+    detectedHeader = false;
 
 
-    payloadBits =
-        [];
+    expectedFileSize = 0;
+
+    expectedCRC = 0;
 
 
-    receivedBytes =
-        [];
+    fileName = "";
+
+    mimeType = "";
 
 
-    synchronized =
-        false;
+    lastSyncAttempt = 0;
+
+    lastPreviewUpdate = 0;
+
+    lastUiUpdate = 0;
 
 
-    detectedMode =
-        null;
+    if (livePreviewUrl) {
+
+        URL.revokeObjectURL(
+            livePreviewUrl
+        );
+
+        livePreviewUrl =
+            null;
+    }
 
 
-    symbolDuration =
-        0;
+    if (fileNameElement) {
+
+        fileNameElement.textContent =
+            "Waiting for SONICCRYPT...";
+    }
 
 
-    detectedHeader =
-        false;
+    if (receivedText) {
+
+        receivedText.textContent =
+            "0 B / 0 B";
+    }
 
 
-    expectedFileSize =
-        0;
+    if (receivedBytesElement) {
+
+        receivedBytesElement.textContent =
+            "0 B";
+    }
 
 
-    expectedCRC =
-        0;
+    if (expectedBytesElement) {
+
+        expectedBytesElement.textContent =
+            "0 B";
+    }
 
 
-    fileName =
-        "";
+    if (receiveSpeed) {
+
+        receiveSpeed.textContent =
+            "0 B/s";
+    }
 
 
-    mimeType =
-        "";
+    if (receivePercent) {
+
+        receivePercent.textContent =
+            "0%";
+    }
 
 
-    lastSyncAttempt =
-        0;
+    if (receiveFill) {
+
+        receiveFill.style.width =
+            "0%";
+    }
 
 
-    lastPreviewUpdate =
-        0;
+    if (frequencyElement) {
+
+        frequencyElement.textContent =
+            "---";
+    }
 
 
-    lastUiUpdate =
-        0;
+    if (symbolsReceived) {
+
+        symbolsReceived.textContent =
+            "0";
+    }
 
 
-    fileNameElement.textContent =
-        "Waiting for SONICCRYPT...";
+    if (previewStatus) {
+
+        previewStatus.textContent =
+            "Waiting for data...";
+    }
 
 
-    receivedText.textContent =
-        "0 B / 0 B";
+    if (receivedImage) {
+
+        receivedImage.style.display =
+            "none";
+
+        receivedImage.removeAttribute(
+            "src"
+        );
+    }
 
 
-    receivedBytesElement.textContent =
-        "0 B";
+    if (downloadButton) {
 
+        downloadButton.style.display =
+            "none";
 
-    expectedBytesElement.textContent =
-        "0 B";
-
-
-    receiveSpeed.textContent =
-        "0 B/s";
-
-
-    receivePercent.textContent =
-        "0%";
-
-
-    receiveFill.style.width =
-        "0%";
-
-
-    frequencyElement.textContent =
-        "---";
-
-
-    symbolsReceived.textContent =
-        "0";
-
-
-    previewStatus.textContent =
-        "Waiting for data...";
-
-
-    receivedImage.style.display =
-        "none";
-
-
-    receivedImage.removeAttribute(
-        "src"
-    );
-
-
-    downloadButton.style.display =
-        "none";
+        downloadButton.removeAttribute(
+            "href"
+        );
+    }
 }
 
 
@@ -2537,7 +2998,8 @@ function formatBytes(
 ) {
 
     if (
-        bytes === 0
+        !Number.isFinite(bytes) ||
+        bytes <= 0
     ) {
 
         return "0 B";
@@ -2553,9 +3015,12 @@ function formatBytes(
 
 
     const index =
-        Math.floor(
-            Math.log(bytes) /
-            Math.log(1024)
+        Math.min(
+            units.length - 1,
+            Math.floor(
+                Math.log(bytes) /
+                Math.log(1024)
+            )
         );
 
 
@@ -2603,7 +3068,12 @@ log(
 
 
 log(
-    "Receiver optimized for low CPU usage."
+    "Adaptive 44.1/48 kHz microphone timing enabled."
+);
+
+
+log(
+    "SCX1 synchronization engine ready."
 );
 
 
