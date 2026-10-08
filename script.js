@@ -1,46 +1,59 @@
 /*
- * ============================================================
- * SONICCRYPT RECEIVER
- * ============================================================
- *
- * Compatible with the NEW SONICCRYPT transmitter.
- *
- * 16-FSK:
- *
- * 0  = 1000 Hz
- * 1  = 1200 Hz
- * 2  = 1400 Hz
- * ...
- * F  = 4000 Hz
- *
- * Synchronization:
- *
- * 0 F 0 F 0 F 0 F...
- *
- * Header:
- *
- * SCX2
- * VERSION
- * FILE NAME
- * MIME TYPE
- * FILE SIZE
- * CRC32
- *
- * Payload:
- *
- * 5 random bits
- * +
- * 8 actual data bits
- *
- * = 13 bits per original byte
- *
- * ============================================================
- */
+============================================================
+SONICCRYPT RECEIVER
+============================================================
+
+MATCHES THE CURRENT SONICCRYPT TRANSMITTER
+
+16-FSK:
+
+0  = 1000 Hz
+1  = 1200 Hz
+2  = 1400 Hz
+3  = 1600 Hz
+4  = 1800 Hz
+5  = 2000 Hz
+6  = 2200 Hz
+7  = 2400 Hz
+8  = 2600 Hz
+9  = 2800 Hz
+A  = 3000 Hz
+B  = 3200 Hz
+C  = 3400 Hz
+D  = 3600 Hz
+E  = 3800 Hz
+F  = 4000 Hz
+
+CURRENT SENDER SPEEDS:
+
+Turbo:
+3 ms / symbol
+
+Reliable:
+6 ms / symbol
+
+HEADER:
+
+SCX1
+version
+filename
+MIME type
+file size
+CRC32
+
+PAYLOAD:
+
+5 random bits
++
+8 data bits
+
+============================================================
+*/
 
 
-/* ============================================================
-   FREQUENCIES
-   ============================================================ */
+/* =========================================================
+   PROTOCOL
+========================================================= */
 
 const FREQUENCIES =
     Array.from(
@@ -49,56 +62,30 @@ const FREQUENCIES =
     );
 
 
-/*
- * Sender creates:
- *
- * Turbo:
- * 176 samples @ 44100 Hz
- *
- * Reliable:
- * 264 samples @ 44100 Hz
- */
+const MODES = {
 
-const SYMBOL_DURATIONS = {
+    turbo: 0.003,
 
-    turbo:
-        176 / 44100,
-
-    reliable:
-        264 / 44100
+    reliable: 0.006
 };
 
 
 /*
- * Synchronization pattern.
+ * SCX1 in hexadecimal:
  *
- * 1000 Hz
- * 4000 Hz
- * 1000 Hz
- * 4000 Hz
- *
- * repeated 48 times.
+ * S = 0x53 = 5,3
+ * C = 0x43 = 4,3
+ * X = 0x58 = 5,8
+ * 1 = 0x31 = 3,1
  */
 
-const PREAMBLE = [];
-
-for (
-    let i = 0;
-    i < 48;
-    i++
-) {
-
-    PREAMBLE.push(
-        i % 2 === 0
-            ? 0
-            : 15
-    );
-}
+const MAGIC =
+    [5, 3, 4, 3, 5, 8, 3, 1];
 
 
-/* ============================================================
+/* =========================================================
    AUDIO
-   ============================================================ */
+========================================================= */
 
 let audioContext = null;
 
@@ -110,38 +97,23 @@ let silentGain = null;
 
 let mediaStream = null;
 
+let actualSampleRate = 48000;
 
-/*
- * Raw microphone samples.
- */
+
+/* =========================================================
+   AUDIO BUFFER
+========================================================= */
 
 let sampleBuffer = [];
-
-
-/*
- * Where the decoder currently is.
- */
 
 let decodePosition = 0;
 
 
-/*
- * Actual microphone sample rate.
- */
-
-let actualSampleRate = 44100;
-
-
-/*
- * Listening state.
- */
+/* =========================================================
+   RECEIVER STATE
+========================================================= */
 
 let listening = false;
-
-
-/* ============================================================
-   SYNCHRONIZATION
-   ============================================================ */
 
 let synchronized = false;
 
@@ -150,11 +122,16 @@ let detectedMode = null;
 let symbolDuration = null;
 
 
-/* ============================================================
-   DATA
-   ============================================================ */
+/* =========================================================
+   SYMBOL DATA
+========================================================= */
 
 let symbolBuffer = [];
+
+
+/* =========================================================
+   FILE DATA
+========================================================= */
 
 let detectedHeader = false;
 
@@ -168,12 +145,12 @@ let mimeType = "";
 
 let receivedBytes = [];
 
-let payloadBitBuffer = [];
+let payloadBits = [];
 
 
-/* ============================================================
-   UI STATE
-   ============================================================ */
+/* =========================================================
+   TIMING
+========================================================= */
 
 let receiveStartTime = 0;
 
@@ -182,94 +159,111 @@ let lastPreviewUpdate = 0;
 let lastUiUpdate = 0;
 
 
-/* ============================================================
+/* =========================================================
    ELEMENTS
-   ============================================================ */
+========================================================= */
 
 const startButton =
     document.getElementById(
         "startButton"
     );
 
+
 const stopButton =
     document.getElementById(
         "stopButton"
     );
+
 
 const statusElement =
     document.getElementById(
         "status"
     );
 
+
 const signalStrength =
     document.getElementById(
         "signalStrength"
     );
+
 
 const signalFill =
     document.getElementById(
         "signalFill"
     );
 
+
 const frequencyElement =
     document.getElementById(
         "frequency"
     );
+
 
 const symbolsReceived =
     document.getElementById(
         "symbolsReceived"
     );
 
+
 const fileNameElement =
     document.getElementById(
         "fileName"
     );
+
 
 const receivedText =
     document.getElementById(
         "receivedText"
     );
 
+
 const receivePercent =
     document.getElementById(
         "receivePercent"
     );
+
 
 const receiveFill =
     document.getElementById(
         "receiveFill"
     );
 
+
 const receivedBytesElement =
     document.getElementById(
         "receivedBytes"
     );
+
 
 const expectedBytesElement =
     document.getElementById(
         "expectedBytes"
     );
 
+
 const receiveSpeed =
     document.getElementById(
         "receiveSpeed"
     );
+
 
 const receivedImage =
     document.getElementById(
         "receivedImage"
     );
 
+
 const previewStatus =
     document.getElementById(
         "previewStatus"
     );
 
+
 const downloadButton =
     document.getElementById(
         "downloadButton"
     );
+
 
 const logElement =
     document.getElementById(
@@ -277,9 +271,9 @@ const logElement =
     );
 
 
-/* ============================================================
-   LOGGING
-   ============================================================ */
+/* =========================================================
+   LOG
+========================================================= */
 
 function log(message) {
 
@@ -288,26 +282,30 @@ function log(message) {
             "div"
         );
 
+
     entry.className =
         "log-entry";
+
 
     entry.innerHTML =
         `<span class="log-time">
             [${new Date().toLocaleTimeString()}]
         </span> ${message}`;
 
+
     logElement.appendChild(
         entry
     );
+
 
     logElement.scrollTop =
         logElement.scrollHeight;
 }
 
 
-/* ============================================================
-   START LISTENING
-   ============================================================ */
+/* =========================================================
+   START
+========================================================= */
 
 startButton.onclick =
     startListening;
@@ -343,14 +341,6 @@ async function startListening() {
                 });
 
 
-        /*
-         * IMPORTANT:
-         *
-         * We do NOT force 44100 Hz.
-         *
-         * The browser may use 48000 Hz.
-         */
-
         audioContext =
             new AudioContext();
 
@@ -379,13 +369,14 @@ async function startListening() {
 
 
         /*
-         * Zero-volume output prevents
-         * microphone feedback.
+         * Keep ScriptProcessor alive without
+         * playing microphone audio through
+         * the speakers.
          */
 
         silentGain =
-            audioContext
-                .createGain();
+            audioContext.createGain();
+
 
         silentGain.gain.value =
             0;
@@ -395,9 +386,11 @@ async function startListening() {
             processor
         );
 
+
         processor.connect(
             silentGain
         );
+
 
         silentGain.connect(
             audioContext.destination
@@ -408,7 +401,7 @@ async function startListening() {
             processAudio;
 
 
-        resetDecoder();
+        resetReceiver();
 
 
         listening = true;
@@ -425,6 +418,7 @@ async function startListening() {
         startButton.disabled =
             true;
 
+
         stopButton.disabled =
             false;
 
@@ -440,7 +434,7 @@ async function startListening() {
 
 
         log(
-            "Searching for SONICCRYPT synchronization..."
+            "Searching for SONICCRYPT SCX1 header..."
         );
 
 
@@ -461,9 +455,9 @@ async function startListening() {
 }
 
 
-/* ============================================================
-   STOP LISTENING
-   ============================================================ */
+/* =========================================================
+   STOP
+========================================================= */
 
 stopButton.onclick =
     stopListening;
@@ -503,13 +497,12 @@ function stopListening() {
 
     if (mediaStream) {
 
-        for (
-            const track
-            of mediaStream.getTracks()
-        ) {
-
-            track.stop();
-        }
+        mediaStream
+            .getTracks()
+            .forEach(
+                track =>
+                    track.stop()
+            );
 
         mediaStream = null;
     }
@@ -530,6 +523,7 @@ function stopListening() {
     startButton.disabled =
         false;
 
+
     stopButton.disabled =
         true;
 
@@ -540,9 +534,9 @@ function stopListening() {
 }
 
 
-/* ============================================================
+/* =========================================================
    AUDIO PROCESSING
-   ============================================================ */
+========================================================= */
 
 function processAudio(event) {
 
@@ -557,8 +551,18 @@ function processAudio(event) {
 
 
     /*
-     * Copy samples out of the browser's
-     * temporary audio buffer.
+     * Always update the signal meter.
+     *
+     * This is separate from decoding.
+     */
+
+    updateRawSignal(
+        input
+    );
+
+
+    /*
+     * Copy samples.
      */
 
     for (
@@ -576,40 +580,40 @@ function processAudio(event) {
     /*
      * Before synchronization:
      *
-     * look for the preamble.
+     * search for SCX1.
      */
 
     if (!synchronized) {
 
-        updateRawSignal(
-            input
-        );
-
-        searchForSync();
+        searchForHeader();
 
         return;
     }
 
 
     /*
-     * After synchronization:
-     *
-     * decode normal data.
+     * Once synchronized,
+     * decode symbols.
      */
 
-    decodeSynchronizedAudio();
+    decodeIncomingSymbols();
 }
 
 
-/* ============================================================
-   RAW SIGNAL DISPLAY
-   ============================================================ */
+/* =========================================================
+   SIGNAL METER
+========================================================= */
 
 function updateRawSignal(
     samples
 ) {
 
-    let sum = 0;
+    let sum =
+        0;
+
+
+    let peak =
+        0;
 
 
     for (
@@ -617,8 +621,22 @@ function updateRawSignal(
         of samples
     ) {
 
+        const absolute =
+            Math.abs(sample);
+
+
         sum +=
             sample * sample;
+
+
+        if (
+            absolute >
+            peak
+        ) {
+
+            peak =
+                absolute;
+        }
     }
 
 
@@ -629,10 +647,34 @@ function updateRawSignal(
         );
 
 
-    const percent =
+    /*
+     * Logarithmic-ish microphone
+     * signal meter.
+     *
+     * This makes normal microphone
+     * levels visible instead of
+     * showing 0%.
+     */
+
+    let percent =
+        20 *
+        Math.log10(
+            1 +
+            rms * 100
+        );
+
+
+    percent =
+        Math.max(
+            percent,
+            peak * 80
+        );
+
+
+    percent =
         Math.min(
             100,
-            rms * 250
+            percent
         );
 
 
@@ -642,14 +684,14 @@ function updateRawSignal(
 }
 
 
-/* ============================================================
-   SYNCHRONIZATION SEARCH
-   ============================================================ */
+/* =========================================================
+   SEARCH FOR SCX1
+========================================================= */
 
-function searchForSync() {
+function searchForHeader() {
 
     /*
-     * We automatically try BOTH modes.
+     * We try both sender speeds.
      */
 
     const modes = [
@@ -659,7 +701,7 @@ function searchForSync() {
                 "turbo",
 
             duration:
-                SYMBOL_DURATIONS.turbo
+                MODES.turbo
         },
 
         {
@@ -667,7 +709,7 @@ function searchForSync() {
                 "reliable",
 
             duration:
-                SYMBOL_DURATIONS.reliable
+                MODES.reliable
         }
     ];
 
@@ -682,20 +724,21 @@ function searchForSync() {
             actualSampleRate;
 
 
-        const requiredSamples =
+        /*
+         * We need at least the
+         * 8-symbol SCX1 sequence.
+         */
+
+        const needed =
             Math.ceil(
-                PREAMBLE.length *
+                MAGIC.length *
                 samplesPerSymbol
             );
 
 
-        /*
-         * Not enough audio yet.
-         */
-
         if (
             sampleBuffer.length <
-            requiredSamples
+            needed
         ) {
 
             continue;
@@ -703,61 +746,45 @@ function searchForSync() {
 
 
         /*
-         * Search the most recent
-         * ~1 second of audio.
+         * Search possible alignment.
+         *
+         * We don't assume the first microphone
+         * sample is the beginning of a symbol.
          */
 
-        const maxSearch =
+        const maxOffset =
             Math.min(
-                sampleBuffer.length -
-                requiredSamples,
-
                 Math.floor(
-                    actualSampleRate *
-                    1.0
-                )
+                    samplesPerSymbol
+                ),
+
+                1000
             );
 
 
-        /*
-         * Check every 4 samples.
-         *
-         * This is much faster than checking
-         * every single sample while still
-         * giving good synchronization.
-         */
-
         for (
-            let start = 0;
-            start <= maxSearch;
-            start += 4
+            let offset = 0;
+            offset < maxOffset;
+            offset += 2
         ) {
 
-            const score =
-                scoreSyncCandidate(
-                    start,
+            const result =
+                testMagicAt(
+                    offset,
                     samplesPerSymbol
                 );
 
 
-            /*
-             * Strong enough = LOCK.
-             */
-
             if (
-                score >= 0.72
+                result.score >=
+                0.70
             ) {
 
-                detectedMode =
-                    mode.name;
-
-                symbolDuration =
-                    mode.duration;
-
-
-                lockSynchronization(
-                    start,
-                    samplesPerSymbol
+                lockHeader(
+                    offset,
+                    samplesPerSymbol,
+                    mode.name,
+                    result
                 );
 
 
@@ -768,72 +795,62 @@ function searchForSync() {
 
 
     /*
-     * Keep memory under control.
+     * Keep only recent audio.
      */
 
-    const maxBuffer =
+    const maximum =
         Math.floor(
             actualSampleRate *
-            1.5
+            0.5
         );
 
 
     if (
         sampleBuffer.length >
-        maxBuffer
+        maximum
     ) {
 
         sampleBuffer =
             sampleBuffer.slice(
-                -Math.floor(
-                    actualSampleRate *
-                    0.8
-                )
+                -maximum
             );
     }
 }
 
 
-/* ============================================================
-   SCORE SYNCHRONIZATION CANDIDATE
-   ============================================================ */
+/* =========================================================
+   TEST MAGIC
+========================================================= */
 
-function scoreSyncCandidate(
-    start,
+function testMagicAt(
+    offset,
     samplesPerSymbol
 ) {
 
     let correct =
         0;
 
-    let total =
+
+    let confidence =
         0;
 
-    let confidenceTotal =
-        0;
-
-
-    /*
-     * We verify the complete 48-symbol
-     * synchronization sequence.
-     */
 
     for (
         let i = 0;
-        i < PREAMBLE.length;
+        i < MAGIC.length;
         i++
     ) {
 
-        const symbolStart =
-            start +
+        const start =
+            offset +
             Math.round(
                 i *
                 samplesPerSymbol
             );
 
 
-        const symbolEnd =
-            start +
+        const end =
+            offset +
             Math.round(
                 (i + 1) *
                 samplesPerSymbol
@@ -841,159 +858,172 @@ function scoreSyncCandidate(
 
 
         if (
-            symbolEnd >
+            end >
             sampleBuffer.length
         ) {
 
-            return 0;
+            return {
+                score: 0
+            };
         }
 
 
         const samples =
             sampleBuffer.slice(
-                symbolStart,
-                symbolEnd
+                start,
+                end
             );
 
 
-        const result =
+        const detected =
             detectFrequency(
                 samples
             );
 
 
-        if (!result) {
-            return 0;
+        if (!detected) {
+
+            continue;
         }
 
 
-        const expected =
-            PREAMBLE[i];
-
-
         if (
-            result.symbol ===
-            expected
+            detected.symbol ===
+            MAGIC[i]
         ) {
 
             correct++;
         }
 
 
-        confidenceTotal +=
-            result.confidence;
-
-
-        total++;
-    }
-
-
-    if (!total) {
-        return 0;
+        confidence +=
+            detected.confidence;
     }
 
 
     const accuracy =
         correct /
-        total;
+        MAGIC.length;
 
 
-    const confidence =
-        confidenceTotal /
-        total;
+    const averageConfidence =
+        confidence /
+        MAGIC.length;
 
 
-    return (
-        accuracy * 0.80 +
-        confidence * 0.20
-    );
+    return {
+
+        score:
+            accuracy * 0.85 +
+            averageConfidence * 0.15,
+
+        accuracy
+    };
 }
 
 
-/* ============================================================
-   LOCK SYNCHRONIZATION
-   ============================================================ */
+/* =========================================================
+   LOCK
+========================================================= */
 
-function lockSynchronization(
-    start,
-    samplesPerSymbol
+function lockHeader(
+    offset,
+    samplesPerSymbol,
+    mode,
+    result
 ) {
 
+    synchronized =
+        true;
+
+
+    detectedMode =
+        mode;
+
+
+    symbolDuration =
+        samplesPerSymbol /
+        actualSampleRate;
+
+
     /*
-     * Calculate how many samples the
-     * preamble occupied.
+     * Remove everything through SCX1.
      */
 
-    const preambleSamples =
+    const headerLength =
         Math.round(
-            PREAMBLE.length *
+            MAGIC.length *
             samplesPerSymbol
         );
 
 
-    /*
-     * Throw away everything through
-     * the end of the preamble.
-     */
-
     sampleBuffer =
         sampleBuffer.slice(
-            start +
-            preambleSamples
+            offset +
+            headerLength
         );
 
 
-    decodePosition = 0;
+    decodePosition =
+        0;
 
 
-    synchronized = true;
+    /*
+     * Put SCX1 into symbolBuffer
+     * so the existing header parser
+     * can use it.
+     */
+
+    symbolBuffer =
+        [...MAGIC];
 
 
     statusElement.textContent =
         "SYNCHRONIZED";
 
 
+    frequencyElement.textContent =
+        "LOCKED";
+
+
     log(
-        "SONICCRYPT SYNC LOCKED."
+        "SONICCRYPT SCX1 HEADER DETECTED."
     );
 
 
     log(
-        `MODE: ${detectedMode.toUpperCase()}`
+        `MODE: ${mode.toUpperCase()}`
     );
 
 
     log(
-        `SYMBOL TIME: ${(symbolDuration * 1000).toFixed(3)} ms`
+        `SYMBOL TIME: ${(symbolDuration * 1000).toFixed(2)} ms`
     );
 
 
     log(
-        `MIC RATE: ${actualSampleRate} Hz`
-    );
-
-
-    log(
-        "Receiving data..."
+        "Receiving header..."
     );
 
 
     /*
-     * Immediately process any data
-     * already waiting in the buffer.
+     * Continue decoding.
      */
 
-    decodeSynchronizedAudio();
+    decodeIncomingSymbols();
 }
 
 
-/* ============================================================
-   SYNCHRONIZED AUDIO DECODER
-   ============================================================ */
+/* =========================================================
+   DECODE INCOMING SYMBOLS
+========================================================= */
 
-function decodeSynchronizedAudio() {
+function decodeIncomingSymbols() {
 
-    if (!symbolDuration) {
+    if (
+        !symbolDuration
+    ) {
+
         return;
     }
 
@@ -1003,14 +1033,7 @@ function decodeSynchronizedAudio() {
         actualSampleRate;
 
 
-    /*
-     * Process as many complete symbols
-     * as are currently available.
-     */
-
-    while (
-        true
-    ) {
+    while (true) {
 
         const start =
             Math.round(
@@ -1049,6 +1072,11 @@ function decodeSynchronizedAudio() {
 
         if (result) {
 
+            symbolBuffer.push(
+                result.symbol
+            );
+
+
             frequencyElement.textContent =
                 `${result.frequency} Hz`;
 
@@ -1056,11 +1084,6 @@ function decodeSynchronizedAudio() {
             updateSignal(
                 result.confidence *
                 100
-            );
-
-
-            symbolBuffer.push(
-                result.symbol
             );
 
 
@@ -1073,14 +1096,12 @@ function decodeSynchronizedAudio() {
 
 
         /*
-         * If we have consumed a lot of
-         * samples, remove them from the
-         * beginning.
+         * Keep buffer small.
          */
 
         if (
             decodePosition >
-            4096
+            8192
         ) {
 
             const remove =
@@ -1102,44 +1123,17 @@ function decodeSynchronizedAudio() {
 }
 
 
-/* ============================================================
+/* =========================================================
    16-FSK DETECTOR
-   ============================================================ */
+========================================================= */
 
 function detectFrequency(
     samples
 ) {
 
     if (
-        !samples ||
-        samples.length < 16
-    ) {
-
-        return null;
-    }
-
-
-    /*
-     * Calculate total signal energy.
-     */
-
-    let energy =
-        0;
-
-
-    for (
-        const sample
-        of samples
-    ) {
-
-        energy +=
-            sample * sample;
-    }
-
-
-    if (
-        energy <
-        0.0000005
+        samples.length <
+        16
     ) {
 
         return null;
@@ -1149,15 +1143,17 @@ function detectFrequency(
     let bestSymbol =
         -1;
 
+
     let bestPower =
         -Infinity;
+
 
     let secondPower =
         -Infinity;
 
 
     /*
-     * Test all 16 possible frequencies.
+     * Check every possible frequency.
      */
 
     for (
@@ -1166,16 +1162,12 @@ function detectFrequency(
         symbol++
     ) {
 
-        const frequency =
-            FREQUENCIES[
-                symbol
-            ];
-
-
         const power =
             frequencyPower(
                 samples,
-                frequency
+                FREQUENCIES[
+                    symbol
+                ]
             );
 
 
@@ -1187,8 +1179,10 @@ function detectFrequency(
             secondPower =
                 bestPower;
 
+
             bestPower =
                 power;
+
 
             bestSymbol =
                 symbol;
@@ -1205,7 +1199,8 @@ function detectFrequency(
 
 
     if (
-        bestSymbol < 0
+        bestSymbol <
+        0
     ) {
 
         return null;
@@ -1213,30 +1208,25 @@ function detectFrequency(
 
 
     /*
-     * How much stronger is the winning
-     * frequency than the runner-up?
+     * Frequency confidence.
      */
 
     const dominance =
         bestPower /
         (
             secondPower +
-            0.0000001
+            0.000001
         );
 
 
-    /*
-     * Convert dominance into 0-1.
-     */
-
     const confidence =
-        Math.min(
-            1,
-            Math.max(
-                0,
+        Math.max(
+            0,
+            Math.min(
+                1,
                 (
                     dominance - 1
-                ) / 2
+                ) / 1.5
             )
         );
 
@@ -1256,28 +1246,22 @@ function detectFrequency(
 }
 
 
-/* ============================================================
-   FREQUENCY POWER
-   ============================================================ */
+/* =========================================================
+   FREQUENCY CORRELATION
+========================================================= */
 
 function frequencyPower(
     samples,
     frequency
 ) {
 
-    let cosineSum =
-        0;
-
-    let sineSum =
+    let cosine =
         0;
 
 
-    /*
-     * Direct correlation.
-     *
-     * Unlike the old Goertzel implementation,
-     * this does NOT round frequencies to FFT bins.
-     */
+    let sine =
+        0;
+
 
     for (
         let i = 0;
@@ -1286,21 +1270,23 @@ function frequencyPower(
     ) {
 
         const phase =
-            2 *
-            Math.PI *
-            frequency *
-            i /
+            (
+                2 *
+                Math.PI *
+                frequency *
+                i
+            ) /
             actualSampleRate;
 
 
-        cosineSum +=
+        cosine +=
             samples[i] *
             Math.cos(
                 phase
             );
 
 
-        sineSum +=
+        sine +=
             samples[i] *
             Math.sin(
                 phase
@@ -1309,28 +1295,30 @@ function frequencyPower(
 
 
     return (
-        cosineSum *
-        cosineSum +
-        sineSum *
-        sineSum
+        cosine *
+        cosine +
+        sine *
+        sine
     );
 }
 
 
-/* ============================================================
+/* =========================================================
    SIGNAL UI
-   ============================================================ */
+========================================================= */
 
 function updateSignal(
     value
 ) {
 
     const rounded =
-        Math.max(
-            0,
-            Math.min(
-                100,
-                Math.round(value)
+        Math.round(
+            Math.max(
+                0,
+                Math.min(
+                    100,
+                    value
+                )
             )
         );
 
@@ -1344,9 +1332,9 @@ function updateSignal(
 }
 
 
-/* ============================================================
+/* =========================================================
    SYMBOL DECODER
-   ============================================================ */
+========================================================= */
 
 function decodeSymbols() {
 
@@ -1356,146 +1344,30 @@ function decodeSymbols() {
 
 
     /*
-     * Header comes first.
+     * Find SCX1/header.
      */
 
-    if (!detectedHeader) {
+    if (
+        !detectedHeader
+    ) {
 
-        tryFindHeader();
+        parseHeader();
 
         return;
     }
 
 
     /*
-     * Header already decoded.
+     * Decode payload.
      */
 
     decodePayload();
 }
 
 
-/* ============================================================
-   HEADER DETECTION
-   ============================================================ */
-
-function tryFindHeader() {
-
-    /*
-     * SCX2 is:
-     *
-     * S = 0x53 = 5,3
-     * C = 0x43 = 4,3
-     * X = 0x58 = 5,8
-     * 2 = 0x32 = 3,2
-     *
-     * Therefore:
-     *
-     * 5,3,4,3,5,8,3,2
-     */
-
-    const magic = [
-        5,
-        3,
-        4,
-        3,
-        5,
-        8,
-        3,
-        2
-    ];
-
-
-    /*
-     * Need enough symbols to search.
-     */
-
-    if (
-        symbolBuffer.length <
-        magic.length
-    ) {
-
-        return;
-    }
-
-
-    /*
-     * Search for SCX2.
-     */
-
-    for (
-        let i = 0;
-        i <=
-        symbolBuffer.length -
-        magic.length;
-        i++
-    ) {
-
-        let match =
-            true;
-
-
-        for (
-            let j = 0;
-            j < magic.length;
-            j++
-        ) {
-
-            if (
-                symbolBuffer[
-                    i + j
-                ] !==
-                magic[j]
-            ) {
-
-                match =
-                    false;
-
-                break;
-            }
-        }
-
-
-        if (match) {
-
-            /*
-             * Throw away anything before
-             * the header.
-             */
-
-            symbolBuffer =
-                symbolBuffer.slice(
-                    i
-                );
-
-
-            parseHeader();
-
-            return;
-        }
-    }
-
-
-    /*
-     * Prevent unlimited growth.
-     */
-
-    if (
-        symbolBuffer.length >
-        2000
-    ) {
-
-        symbolBuffer =
-            symbolBuffer.slice(
-                -100
-            );
-    }
-}
-
-
-/* ============================================================
+/* =========================================================
    HEADER
-   ============================================================ */
+========================================================= */
 
 function parseHeader() {
 
@@ -1506,11 +1378,8 @@ function parseHeader() {
 
 
     /*
-     * Need:
-     *
-     * SCX2
-     * version
-     * name length
+     * Need enough data to start
+     * reading the header.
      */
 
     if (
@@ -1523,30 +1392,30 @@ function parseHeader() {
 
 
     /*
-     * Verify SCX2.
+     * Verify SCX1.
      */
 
     if (
         bytes[0] !== 0x53 ||
         bytes[1] !== 0x43 ||
         bytes[2] !== 0x58 ||
-        bytes[3] !== 0x32
+        bytes[3] !== 0x31
     ) {
 
         return;
     }
 
 
-    const version =
-        bytes[4];
-
+    /*
+     * Version.
+     */
 
     if (
-        version !== 2
+        bytes[4] !== 1
     ) {
 
         log(
-            `Unsupported protocol version: ${version}`
+            "Unsupported SONICCRYPT version."
         );
 
         return;
@@ -1558,7 +1427,7 @@ function parseHeader() {
 
 
     /*
-     * NAME LENGTH
+     * Filename length.
      */
 
     if (
@@ -1579,11 +1448,12 @@ function parseHeader() {
         ];
 
 
-    position += 2;
+    position +=
+        2;
 
 
     /*
-     * Wait for complete name.
+     * Need complete filename.
      */
 
     if (
@@ -1615,7 +1485,7 @@ function parseHeader() {
 
 
     /*
-     * MIME LENGTH
+     * MIME length.
      */
 
     const mimeLength =
@@ -1627,11 +1497,12 @@ function parseHeader() {
         ];
 
 
-    position += 2;
+    position +=
+        2;
 
 
     /*
-     * Wait for MIME + size + CRC.
+     * Need MIME + size + CRC.
      */
 
     if (
@@ -1646,7 +1517,7 @@ function parseHeader() {
 
 
     /*
-     * MIME
+     * MIME type.
      */
 
     mimeType =
@@ -1685,7 +1556,8 @@ function parseHeader() {
         ) >>> 0;
 
 
-    position += 4;
+    position +=
+        4;
 
 
     /*
@@ -1707,13 +1579,15 @@ function parseHeader() {
         ) >>> 0;
 
 
-    position += 4;
+    position +=
+        4;
 
 
     /*
-     * Header is now complete.
+     * Header is complete.
      *
-     * Every byte = 2 symbols.
+     * Each byte is represented by
+     * TWO 16-FSK symbols.
      */
 
     const headerSymbolCount =
@@ -1730,7 +1604,7 @@ function parseHeader() {
 
 
     /*
-     * Remove header.
+     * Remove header from symbol buffer.
      */
 
     symbolBuffer =
@@ -1744,7 +1618,7 @@ function parseHeader() {
 
 
     /*
-     * UI
+     * UI.
      */
 
     fileNameElement.textContent =
@@ -1762,40 +1636,46 @@ function parseHeader() {
 
 
     log(
-        `SONICCRYPT transmission detected: ${fileName}`
+        `File detected: ${fileName}`
     );
 
 
     log(
-        `Expected size: ${formatBytes(
+        `File size: ${formatBytes(
             expectedFileSize
         )}`
     );
 
 
     log(
-        `MIME type: ${mimeType}`
+        `Type: ${mimeType}`
     );
 
 
     log(
-        `CRC32: ${expectedCRC
-            .toString(16)
-            .padStart(8, "0")}`
+        `Expected CRC32: ${
+            expectedCRC
+                .toString(16)
+                .padStart(
+                    8,
+                    "0"
+                )
+        }`
     );
 
 
-    /*
-     * Decode any payload already waiting.
-     */
+    log(
+        "Receiving file data..."
+    );
+
 
     decodePayload();
 }
 
 
-/* ============================================================
-   SYMBOLS -> BYTES
-   ============================================================ */
+/* =========================================================
+   SYMBOLS TO BYTES
+========================================================= */
 
 function symbolsToBytes(
     symbols
@@ -1813,9 +1693,12 @@ function symbolsToBytes(
     ) {
 
         bytes.push(
+
             (
-                symbols[i] << 4
+                symbols[i]
+                << 4
             ) |
+
             symbols[
                 i + 1
             ]
@@ -1827,25 +1710,22 @@ function symbolsToBytes(
 }
 
 
-/* ============================================================
-   PAYLOAD DECODER
-   ============================================================ */
+/* =========================================================
+   PAYLOAD
+========================================================= */
 
 function decodePayload() {
 
     /*
-     * Convert symbols into bits.
+     * Convert symbols to bits.
      */
 
-    while (
-        symbolBuffer.length > 0
+    for (
+        const symbol
+        of symbolBuffer
     ) {
 
-        const symbol =
-            symbolBuffer.shift();
-
-
-        payloadBitBuffer.push(
+        payloadBits.push(
 
             (symbol >> 3) & 1,
 
@@ -1855,76 +1735,77 @@ function decodePayload() {
 
             symbol & 1
         );
+    }
+
+
+    /*
+     * We consumed the symbols.
+     */
+
+    symbolBuffer =
+        [];
+
+
+    /*
+     * Each original byte is:
+     *
+     * 5 random bits
+     * +
+     * 8 real bits
+     *
+     * = 13 bits
+     */
+
+    while (
+        payloadBits.length >=
+        13
+    ) {
+
+        let value =
+            0;
 
 
         /*
-         * Every byte requires exactly
-         * 13 bits.
+         * Skip first 5 bits.
          */
 
-        while (
-            payloadBitBuffer.length >=
-            13
+        for (
+            let i = 5;
+            i < 13;
+            i++
         ) {
 
-            /*
-             * First 5 bits are random.
-             */
-
-            let value =
-                0;
-
-
-            /*
-             * Last 8 bits are the
-             * original byte.
-             */
-
-            for (
-                let i = 5;
-                i < 13;
-                i++
-            ) {
-
-                value =
-                    (
-                        value << 1
-                    ) |
-                    payloadBitBuffer[
-                        i
-                    ];
-            }
+            value =
+                (
+                    value << 1
+                ) |
+                payloadBits[i];
+        }
 
 
-            /*
-             * Remove the complete
-             * 13-bit block.
-             */
-
-            payloadBitBuffer.splice(
-                0,
-                13
-            );
+        receivedBytes.push(
+            value
+        );
 
 
-            receivedBytes.push(
-                value
-            );
+        payloadBits.splice(
+            0,
+            13
+        );
 
 
-            /*
-             * Complete?
-             */
+        /*
+         * Complete file?
+         */
 
-            if (
-                receivedBytes.length >=
-                expectedFileSize
-            ) {
+        if (
+            receivedBytes.length >=
+            expectedFileSize
+        ) {
 
-                finishReception();
+            finishReception();
 
-                return;
-            }
+            return;
         }
     }
 
@@ -1935,9 +1816,9 @@ function decodePayload() {
 }
 
 
-/* ============================================================
-   RECEIVE PROGRESS
-   ============================================================ */
+/* =========================================================
+   PROGRESS
+========================================================= */
 
 function updateReceiveProgress() {
 
@@ -2025,9 +1906,9 @@ function updateReceiveProgress() {
 }
 
 
-/* ============================================================
-   LIVE IMAGE PREVIEW
-   ============================================================ */
+/* =========================================================
+   LIVE IMAGE
+========================================================= */
 
 function updateLivePreview() {
 
@@ -2038,7 +1919,7 @@ function updateLivePreview() {
     if (
         now -
         lastPreviewUpdate <
-        1000
+        750
     ) {
 
         return;
@@ -2064,14 +1945,9 @@ function updateLivePreview() {
     }
 
 
-    /*
-     * Browser may not render an image until
-     * enough of the file has arrived.
-     */
-
     if (
         receivedBytes.length <
-        64
+        100
     ) {
 
         return;
@@ -2100,11 +1976,11 @@ function updateLivePreview() {
             );
 
 
-        const testImage =
+        const image =
             new Image();
 
 
-        testImage.onload =
+        image.onload =
             () => {
 
                 receivedImage.src =
@@ -2120,7 +1996,7 @@ function updateLivePreview() {
             };
 
 
-        testImage.onerror =
+        image.onerror =
             () => {
 
                 URL.revokeObjectURL(
@@ -2129,19 +2005,22 @@ function updateLivePreview() {
             };
 
 
-        testImage.src =
+        image.src =
             url;
 
 
     } catch {
-        /* Keep receiving. */
+
+        /*
+         * Keep receiving.
+         */
     }
 }
 
 
-/* ============================================================
+/* =========================================================
    FINISH
-   ============================================================ */
+========================================================= */
 
 function finishReception() {
 
@@ -2164,7 +2043,7 @@ function finishReception() {
 
 
     /*
-     * Verify checksum.
+     * Verify CRC.
      */
 
     if (
@@ -2177,7 +2056,7 @@ function finishReception() {
 
 
         previewStatus.textContent =
-            "Data received, but CRC32 failed.";
+            "Checksum failed.";
 
 
         log(
@@ -2186,16 +2065,26 @@ function finishReception() {
 
 
         log(
-            `Expected: ${expectedCRC
-                .toString(16)
-                .padStart(8, "0")}`
+            `Expected: ${
+                expectedCRC
+                    .toString(16)
+                    .padStart(
+                        8,
+                        "0"
+                    )
+            }`
         );
 
 
         log(
-            `Received: ${actualCRC
-                .toString(16)
-                .padStart(8, "0")}`
+            `Received: ${
+                actualCRC
+                    .toString(16)
+                    .padStart(
+                        8,
+                        "0"
+                    )
+            }`
         );
 
 
@@ -2204,7 +2093,7 @@ function finishReception() {
 
 
     /*
-     * Success.
+     * SUCCESS
      */
 
     statusElement.textContent =
@@ -2219,37 +2108,19 @@ function finishReception() {
         "100%";
 
 
-    receivedBytesElement.textContent =
-        formatBytes(
-            expectedFileSize
-        );
-
-
-    receivedText.textContent =
-        `${formatBytes(
-            expectedFileSize
-        )} / ${formatBytes(
-            expectedFileSize
-        )}`;
-
-
     previewStatus.textContent =
         "FILE RECEIVED SUCCESSFULLY";
 
 
     log(
-        "Transmission complete."
+        "TRANSMISSION COMPLETE."
     );
 
 
     log(
-        "CRC32 verified successfully."
+        "CRC32 VERIFIED."
     );
 
-
-    /*
-     * Build final file.
-     */
 
     const blob =
         new Blob(
@@ -2305,11 +2176,11 @@ function finishReception() {
 }
 
 
-/* ============================================================
+/* =========================================================
    RESET
-   ============================================================ */
+========================================================= */
 
-function resetDecoder() {
+function resetReceiver() {
 
     sampleBuffer = [];
 
@@ -2328,7 +2199,8 @@ function resetDecoder() {
         null;
 
 
-    symbolBuffer = [];
+    symbolBuffer =
+        [];
 
 
     detectedHeader =
@@ -2355,20 +2227,16 @@ function resetDecoder() {
         [];
 
 
-    payloadBitBuffer =
+    payloadBits =
         [];
-
-
-    lastPreviewUpdate =
-        0;
-
-
-    lastUiUpdate =
-        0;
 
 
     fileNameElement.textContent =
         "Waiting for SONICCRYPT...";
+
+
+    receivedText.textContent =
+        "0 B / 0 B";
 
 
     receivedBytesElement.textContent =
@@ -2381,10 +2249,6 @@ function resetDecoder() {
 
     receiveSpeed.textContent =
         "0 B/s";
-
-
-    receivedText.textContent =
-        "0 B / 0 B";
 
 
     receivePercent.textContent =
@@ -2403,6 +2267,10 @@ function resetDecoder() {
         "0";
 
 
+    previewStatus.textContent =
+        "Waiting for data...";
+
+
     receivedImage.style.display =
         "none";
 
@@ -2414,18 +2282,16 @@ function resetDecoder() {
 
     downloadButton.style.display =
         "none";
-
-
-    previewStatus.textContent =
-        "Waiting for data...";
 }
 
 
-/* ============================================================
+/* =========================================================
    CRC32
-   ============================================================ */
+========================================================= */
 
-function crc32(bytes) {
+function crc32(
+    bytes
+) {
 
     let crc =
         0xffffffff;
@@ -2436,7 +2302,8 @@ function crc32(bytes) {
         of bytes
     ) {
 
-        crc ^= byte;
+        crc ^=
+            byte;
 
 
         for (
@@ -2466,9 +2333,9 @@ function crc32(bytes) {
 }
 
 
-/* ============================================================
+/* =========================================================
    FORMAT BYTES
-   ============================================================ */
+========================================================= */
 
 function formatBytes(
     bytes
@@ -2517,9 +2384,9 @@ function formatBytes(
 }
 
 
-/* ============================================================
+/* =========================================================
    INITIALIZATION
-   ============================================================ */
+========================================================= */
 
 stopButton.disabled =
     true;
@@ -2536,10 +2403,10 @@ log(
 
 
 log(
-    "Automatic TURBO / RELIABLE detection enabled."
+    "Turbo / Reliable automatic detection enabled."
 );
 
 
 log(
-    "Waiting for SONICCRYPT sync signal..."
+    "Waiting for SONICCRYPT SCX1 header..."
 );
