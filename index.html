@@ -1,152 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
+
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
     <title>SONICCRYPT RECEIVER</title>
-    <link rel="stylesheet" href="style.css">
+
+    <link
+        rel="stylesheet"
+        href="./style.css"
+    >
+
 </head>
-
-<body>
-
-<div class="container">
-
-    <header>
-        <div class="logo">SONICCRYPT</div>
-        <div class="subtitle">TURBO ACOUSTIC DATA RECEIVER</div>
-    </header>
-
-
-    <main>
-
-        <section class="panel">
-
-            <h2>RECEIVER</h2>
-
-            <div id="status" class="status">
-                MICROPHONE OFF
-            </div>
-
-            <div class="controls">
-
-                <button id="startButton">
-                    START LISTENING
-                </button>
-
-                <button id="stopButton" disabled>
-                    STOP
-                </button>
-
-            </div>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>LIVE SIGNAL</h2>
-
-            <div class="signal-grid">
-
-                <div class="signal-box">
-                    <span>SIGNAL</span>
-                    <strong id="signalStrength">0%</strong>
-                </div>
-
-                <div class="signal-box">
-                    <span>FREQUENCY</span>
-                    <strong id="frequency">---</strong>
-                </div>
-
-                <div class="signal-box">
-                    <span>SYMBOLS</span>
-                    <strong id="symbolsReceived">0</strong>
-                </div>
-
-            </div>
-
-            <div class="signal-bar">
-                <div id="signalFill"></div>
-            </div>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>TRANSMISSION</h2>
-
-            <div id="fileName" class="file-name">
-                Waiting for SONICCRYPT...
-            </div>
-
-            <div class="progress-info">
-                <span id="receivedText">0 B / 0 B</span>
-                <strong id="receivePercent">0%</strong>
-            </div>
-
-            <div class="progress-bar">
-                <div id="receiveFill"></div>
-            </div>
-
-            <div class="receive-stats">
-
-                <div>
-                    <span>RECEIVED</span>
-                    <strong id="receivedBytes">0 B</strong>
-                </div>
-
-                <div>
-                    <span>EXPECTED</span>
-                    <strong id="expectedBytes">0 B</strong>
-                </div>
-
-                <div>
-                    <span>SPEED</span>
-                    <strong id="receiveSpeed">0 B/s</strong>
-                </div>
-
-            </div>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>LIVE IMAGE / FILE</h2>
-
-            <div id="previewStatus">
-                Waiting for data...
-            </div>
-
-            <div class="image-container">
-                <img id="receivedImage" alt="Received file">
-            </div>
-
-            <a id="downloadButton" class="download-button">
-                DOWNLOAD RECEIVED FILE
-            </a>
-
-        </section>
-
-
-        <section class="panel">
-
-            <h2>RECEIVER LOG</h2>
-
-            <div id="log"></div>
-
-        </section>
-
-    </main>
-
-    <footer>
-        SONICCRYPT // 16-FSK // LIVE ACOUSTIC DECODER
-    </footer>
-
-</div>
-
-<script src="script.js"></script>
-
-</body>
-</html>
