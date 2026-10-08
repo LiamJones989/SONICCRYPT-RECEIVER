@@ -88,8 +88,9 @@ let synchronized = false;
  * Timing
  */
 
-let symbolDuration =
-    SYMBOL_DURATIONS.turbo;
+let symbolDuration = null;
+
+let detectedMode = null;
 
 let actualSampleRate = 44100;
 
