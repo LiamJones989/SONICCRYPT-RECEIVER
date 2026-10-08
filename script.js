@@ -585,30 +585,146 @@ function updateRawSignal(samples) {
 
 function searchForSync() {
 
-    const duration =
-        symbolDuration;
+    /*
+     * Try BOTH sender modes automatically.
+     *
+     * Turbo    = 176 samples @ 44.1 kHz
+     * Reliable = 264 samples @ 44.1 kHz
+     */
+
+    const modes = [
+        {
+            name: "turbo",
+            duration: SYMBOL_DURATIONS.turbo
+        },
+        {
+            name: "reliable",
+            duration: SYMBOL_DURATIONS.reliable
+        }
+    ];
 
 
-    const samplesPerSymbol =
-        duration *
-        actualSampleRate;
+    /*
+     * Try each possible transmission speed.
+     */
+
+    for (const mode of modes) {
+
+        const samplesPerSymbol =
+            mode.duration *
+            actualSampleRate;
 
 
-    const requiredSamples =
-        Math.ceil(
-            PREAMBLE.length *
-            samplesPerSymbol
+        const requiredSamples =
+            Math.ceil(
+                PREAMBLE.length *
+                samplesPerSymbol
+            );
+
+
+        /*
+         * We need the entire synchronization
+         * pattern before we can lock.
+         */
+
+        if (
+            sampleBuffer.length <
+            requiredSamples
+        ) {
+
+            continue;
+        }
+
+
+        /*
+         * Search the newest audio.
+         */
+
+        const maxSearch =
+            Math.min(
+                sampleBuffer.length -
+                requiredSamples,
+
+                Math.floor(
+                    actualSampleRate *
+                    0.75
+                )
+            );
+
+
+        /*
+         * Search more carefully than before.
+         *
+         * 1 sample at a time gives us much
+         * better synchronization.
+         */
+
+        for (
+            let start = 0;
+            start <= maxSearch;
+            start += 2
+        ) {
+
+            const score =
+                scoreSyncCandidate(
+                    start,
+                    samplesPerSymbol
+                );
+
+
+            /*
+             * Strong synchronization lock.
+             */
+
+            if (
+                score >= 0.72
+            ) {
+
+                symbolDuration =
+                    mode.duration;
+
+                detectedMode =
+                    mode.name;
+
+
+                lockSynchronization(
+                    start,
+                    samplesPerSymbol
+                );
+
+
+                return;
+            }
+        }
+    }
+
+
+    /*
+     * Don't let the microphone buffer grow
+     * forever.
+     */
+
+    const maxBuffer =
+        Math.floor(
+            actualSampleRate *
+            1.5
         );
 
 
     if (
-        sampleBuffer.length <
-        requiredSamples
+        sampleBuffer.length >
+        maxBuffer
     ) {
 
-        return;
+        sampleBuffer =
+            sampleBuffer.slice(
+                -Math.floor(
+                    actualSampleRate *
+                    0.8
+                )
+            );
     }
-
+}
 
     /*
      * Search the newest section.
