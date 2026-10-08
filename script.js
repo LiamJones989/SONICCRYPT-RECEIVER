@@ -1,16 +1,3 @@
-const SAMPLE_RATE = 44100;
-
-/*
- * SONICCRYPT TURBO
- *
- * 16-FSK
- *
- * 0  = 1000 Hz
- * 1  = 1200 Hz
- * ...
- * 15 = 4000 Hz
- */
-
 const FREQUENCIES = Array.from(
     { length: 16 },
     (_, i) => 1000 + i * 200
@@ -18,130 +5,161 @@ const FREQUENCIES = Array.from(
 
 
 /*
- * TRANSMISSION SPEEDS
- *
- * 4 ms = fast
- * 6 ms = reliable
+ * The sender supports both modes.
  */
 
-const MODES = {
-    turbo: 0.004,
-    reliable: 0.006
-};
+const SYMBOL_DURATIONS = [
+    0.004,
+    0.006
+];
 
-let currentMode = "turbo";
-
-
-/*
- * SYNCHRONIZATION
- *
- * Alternating extreme frequencies.
- *
- * 0 = 1000 Hz
- * F = 4000 Hz
- *
- * This lets the receiver find the
- * exact beginning of the transmission.
- */
 
 const PREAMBLE = [];
 
 for (let i = 0; i < 32; i++) {
-    PREAMBLE.push(i % 2 === 0 ? 0 : 15);
+    PREAMBLE.push(
+        i % 2 === 0 ? 0 : 15
+    );
 }
 
 
-let selectedFile = null;
-
-let transmissionBytes = [];
-let transmissionSymbols = [];
-
-let audioBuffer = null;
+/*
+ * AUDIO
+ */
 
 let audioContext = null;
-let sourceNode = null;
+let microphone = null;
+let processor = null;
+let silentGain = null;
+let mediaStream = null;
 
-let isPlaying = false;
-let isPaused = false;
+let sampleBuffer = [];
 
-let transmissionStart = 0;
-let pausedAt = 0;
+let listening = false;
+let synchronized = false;
 
-let animationFrame = null;
+let currentSymbolDuration = 0.004;
+let samplesPerSymbol = 0;
+
+
+/*
+ * DECODER
+ */
+
+let symbolBuffer = [];
+
+let headerParsed = false;
+
+let expectedFileSize = 0;
+let expectedCRC = 0;
+
+let fileName = "";
+let mimeType = "";
+
+let payloadBitBuffer = [];
+
+let receivedBytes = [];
+
+let receiveStartTime = 0;
+
+let lastPreviewUpdate = 0;
+
+let lastProgressUpdate = 0;
 
 
 /*
  * ELEMENTS
  */
 
-const fileInput =
-    document.getElementById("fileInput");
-
-const fileInfo =
-    document.getElementById("fileInfo");
-
-const imagePreview =
-    document.getElementById("imagePreview");
-
-const previewContainer =
-    document.getElementById("previewContainer");
-
-const statusElement =
-    document.getElementById("status");
-
-const elapsedTime =
-    document.getElementById("elapsedTime");
-
-const remainingTime =
-    document.getElementById("remainingTime");
-
-const totalTime =
-    document.getElementById("totalTime");
-
-const progressFill =
-    document.getElementById("progressFill");
-
-const progressPercent =
-    document.getElementById("progressPercent");
-
-const playButton =
-    document.getElementById("playButton");
-
-const pauseButton =
-    document.getElementById("pauseButton");
+const startButton =
+    document.getElementById(
+        "startButton"
+    );
 
 const stopButton =
-    document.getElementById("stopButton");
+    document.getElementById(
+        "stopButton"
+    );
 
-const dataSize =
-    document.getElementById("dataSize");
+const statusElement =
+    document.getElementById(
+        "status"
+    );
 
-const encodedBits =
-    document.getElementById("encodedBits");
+const signalStrength =
+    document.getElementById(
+        "signalStrength"
+    );
 
-const symbolCount =
-    document.getElementById("symbolCount");
+const signalFill =
+    document.getElementById(
+        "signalFill"
+    );
 
-const symbolSpeed =
-    document.getElementById("symbolSpeed");
+const frequencyElement =
+    document.getElementById(
+        "frequency"
+    );
 
-const canvas =
-    document.getElementById("waveformCanvas");
+const symbolsReceived =
+    document.getElementById(
+        "symbolsReceived"
+    );
 
-const ctx =
-    canvas.getContext("2d");
+const fileNameElement =
+    document.getElementById(
+        "fileName"
+    );
+
+const receivedText =
+    document.getElementById(
+        "receivedText"
+    );
+
+const receivePercent =
+    document.getElementById(
+        "receivePercent"
+    );
+
+const receiveFill =
+    document.getElementById(
+        "receiveFill"
+    );
+
+const receivedBytesElement =
+    document.getElementById(
+        "receivedBytes"
+    );
+
+const expectedBytesElement =
+    document.getElementById(
+        "expectedBytes"
+    );
+
+const receiveSpeed =
+    document.getElementById(
+        "receiveSpeed"
+    );
+
+const receivedImage =
+    document.getElementById(
+        "receivedImage"
+    );
+
+const previewStatus =
+    document.getElementById(
+        "previewStatus"
+    );
+
+const downloadButton =
+    document.getElementById(
+        "downloadButton"
+    );
 
 const logElement =
-    document.getElementById("log");
-
-const turboButton =
-    document.getElementById("turboMode");
-
-const reliableButton =
-    document.getElementById("reliableMode");
-
-const modeInfo =
-    document.getElementById("modeInfo");
+    document.getElementById(
+        "log"
+    );
 
 
 /*
@@ -151,7 +169,9 @@ const modeInfo =
 function log(message) {
 
     const entry =
-        document.createElement("div");
+        document.createElement(
+            "div"
+        );
 
     entry.className =
         "log-entry";
@@ -169,743 +189,130 @@ function log(message) {
 
 
 /*
- * MODE
+ * START
  */
 
-turboButton.onclick =
-    () => setMode("turbo");
-
-reliableButton.onclick =
-    () => setMode("reliable");
+startButton.onclick =
+    startListening;
 
 
-function setMode(mode) {
+async function startListening() {
 
-    if (isPlaying || isPaused) {
+    if (listening) {
         return;
     }
 
-    currentMode = mode;
 
-    turboButton.classList.toggle(
-        "active",
-        mode === "turbo"
-    );
+    try {
 
-    reliableButton.classList.toggle(
-        "active",
-        mode === "reliable"
-    );
-
-    if (mode === "turbo") {
-
-        modeInfo.textContent =
-            "TURBO: 4 ms symbols. Faster transmission.";
-
-    } else {
-
-        modeInfo.textContent =
-            "RELIABLE: 6 ms symbols. Better for noisy environments.";
-    }
-
-    if (selectedFile) {
-        prepareTransmission(selectedFile);
-    }
-}
+        mediaStream =
+            await navigator
+                .mediaDevices
+                .getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
 
 
-/*
- * FILE
- */
-
-fileInput.addEventListener(
-    "change",
-    async () => {
-
-        const file =
-            fileInput.files[0];
-
-        if (!file) {
-            return;
-        }
-
-        stopTransmission();
-
-        selectedFile = file;
-
-        fileInfo.textContent =
-            `${file.name} — ${formatBytes(file.size)}`;
-
-        dataSize.textContent =
-            formatBytes(file.size);
-
-        if (file.type.startsWith("image/")) {
-
-            const url =
-                URL.createObjectURL(file);
-
-            imagePreview.src = url;
-
-            previewContainer.style.display =
-                "block";
-
-        } else {
-
-            previewContainer.style.display =
-                "none";
-        }
-
-        log(`Selected: ${file.name}`);
-
-        await prepareTransmission(file);
-    }
-);
+        audioContext =
+            new AudioContext();
 
 
-/*
- * PREPARE
- */
-
-async function prepareTransmission(file) {
-
-    statusElement.textContent =
-        "ENCODING";
-
-    const buffer =
-        await file.arrayBuffer();
-
-    const bytes =
-        new Uint8Array(buffer);
+        await audioContext.resume();
 
 
-    /*
-     * HEADER
-     */
+        microphone =
+            audioContext
+                .createMediaStreamSource(
+                    mediaStream
+                );
 
-    const header =
-        buildHeader(
-            file.name,
-            file.type ||
-                "application/octet-stream",
-            bytes.length,
-            crc32(bytes)
+
+        processor =
+            audioContext
+                .createScriptProcessor(
+                    4096,
+                    1,
+                    1
+                );
+
+
+        silentGain =
+            audioContext
+                .createGain();
+
+
+        silentGain.gain.value = 0;
+
+
+        microphone.connect(
+            processor
         );
 
 
-    /*
-     * PAYLOAD
-     *
-     * 5 random bits
-     * +
-     * 8 data bits
-     */
-
-    const payloadBits =
-        encodeCustomBits(bytes);
-
-
-    /*
-     * HEADER BITS
-     */
-
-    const headerBits =
-        bytesToBits(header);
-
-
-    /*
-     * COMPLETE DATA
-     */
-
-    const allBits = [
-        ...headerBits,
-        ...payloadBits
-    ];
-
-
-    /*
-     * 4 BITS = 1 FREQUENCY
-     */
-
-    const dataSymbols =
-        bitsToSymbols(allBits);
-
-
-    /*
-     * ADD SYNC PREAMBLE
-     */
-
-    transmissionSymbols = [
-        ...PREAMBLE,
-        ...dataSymbols
-    ];
-
-
-    transmissionBytes =
-        Array.from(bytes);
-
-
-    const duration =
-        transmissionSymbols.length *
-        MODES[currentMode];
-
-
-    encodedBits.textContent =
-        allBits.length.toLocaleString();
-
-    symbolCount.textContent =
-        transmissionSymbols.length.toLocaleString();
-
-    symbolSpeed.textContent =
-        `${Math.round(
-            1 / MODES[currentMode]
-        )}/sec`;
-
-    totalTime.textContent =
-        formatTime(duration);
-
-    remainingTime.textContent =
-        formatTime(duration);
-
-    elapsedTime.textContent =
-        "00:00";
-
-    progressFill.style.width =
-        "0%";
-
-    progressPercent.textContent =
-        "0%";
-
-
-    log(
-        `File: ${file.name}`
-    );
-
-    log(
-        `Original size: ${bytes.length.toLocaleString()} bytes`
-    );
-
-    log(
-        `Payload bits: ${payloadBits.length.toLocaleString()}`
-    );
-
-    log(
-        `Header bytes: ${header.length}`
-    );
-
-    log(
-        `Total symbols: ${transmissionSymbols.length.toLocaleString()}`
-    );
-
-    log(
-        `Estimated time: ${formatTime(duration)}`
-    );
-
-
-    statusElement.textContent =
-        "GENERATING AUDIO";
-
-
-    audioBuffer =
-        createAudioBuffer(
-            transmissionSymbols
+        processor.connect(
+            silentGain
         );
 
 
-    drawWaveform(
-        audioBuffer
-    );
-
-
-    statusElement.textContent =
-        "READY";
-
-    playButton.disabled =
-        false;
-
-    pauseButton.disabled =
-        true;
-
-    stopButton.disabled =
-        true;
-}
-
-
-/*
- * HEADER
- *
- * SCX2
- *
- * 4 magic bytes
- * 1 version
- * 2 name length
- * name
- * 2 MIME length
- * MIME
- * 4 file size
- * 4 CRC32
- */
-
-function buildHeader(
-    name,
-    mime,
-    fileSize,
-    checksum
-) {
-
-    const encoder =
-        new TextEncoder();
-
-    const nameBytes =
-        encoder.encode(name);
-
-    const mimeBytes =
-        encoder.encode(mime);
-
-    const result = [];
-
-
-    result.push(
-        0x53,
-        0x43,
-        0x58,
-        0x32
-    );
-
-
-    result.push(2);
-
-
-    result.push(
-        (nameBytes.length >> 8) & 0xff,
-        nameBytes.length & 0xff
-    );
-
-    result.push(
-        ...nameBytes
-    );
-
-
-    result.push(
-        (mimeBytes.length >> 8) & 0xff,
-        mimeBytes.length & 0xff
-    );
-
-    result.push(
-        ...mimeBytes
-    );
-
-
-    result.push(
-        (fileSize >>> 24) & 0xff,
-        (fileSize >>> 16) & 0xff,
-        (fileSize >>> 8) & 0xff,
-        fileSize & 0xff
-    );
-
-
-    result.push(
-        (checksum >>> 24) & 0xff,
-        (checksum >>> 16) & 0xff,
-        (checksum >>> 8) & 0xff,
-        checksum & 0xff
-    );
-
-
-    return new Uint8Array(result);
-}
-
-
-/*
- * CUSTOM PROTOCOL
- *
- * Every byte becomes:
- *
- * RANDOM RANDOM RANDOM RANDOM RANDOM
- * DATA DATA DATA DATA DATA DATA DATA DATA
- *
- * 13 bits total
- */
-
-function encodeCustomBits(bytes) {
-
-    const bits = [];
-
-    for (const byte of bytes) {
-
-        const randomBits =
-            new Uint8Array(5);
-
-        crypto.getRandomValues(
-            randomBits
+        silentGain.connect(
+            audioContext.destination
         );
 
 
-        for (let i = 0; i < 5; i++) {
+        processor.onaudioprocess =
+            processAudio;
 
-            bits.push(
-                randomBits[i] & 1
-            );
-        }
 
+        listening = true;
 
-        for (let i = 7; i >= 0; i--) {
+        resetDecoder();
 
-            bits.push(
-                (byte >> i) & 1
-            );
-        }
-    }
 
-    return bits;
-}
-
-
-/*
- * BYTES -> BITS
- */
-
-function bytesToBits(bytes) {
-
-    const bits = [];
-
-    for (const byte of bytes) {
-
-        for (let i = 7; i >= 0; i--) {
-
-            bits.push(
-                (byte >> i) & 1
-            );
-        }
-    }
-
-    return bits;
-}
-
-
-/*
- * BITS -> 4-BIT SYMBOLS
- */
-
-function bitsToSymbols(bits) {
-
-    const symbols = [];
-
-    for (
-        let i = 0;
-        i < bits.length;
-        i += 4
-    ) {
-
-        let value = 0;
-
-        for (let j = 0; j < 4; j++) {
-
-            value <<= 1;
-
-            if (
-                i + j <
-                bits.length
-            ) {
-
-                value |=
-                    bits[i + j];
-            }
-        }
-
-        symbols.push(value);
-    }
-
-    return symbols;
-}
-
-
-/*
- * AUDIO GENERATION
- */
-
-function createAudioBuffer(symbols) {
-
-    const duration =
-        MODES[currentMode];
-
-    const samplesPerSymbol =
-        Math.round(
-            SAMPLE_RATE *
-            duration
-        );
-
-    const totalSamples =
-        samplesPerSymbol *
-        symbols.length;
-
-
-    const buffer =
-        new AudioBuffer({
-            length: totalSamples,
-            numberOfChannels: 1,
-            sampleRate: SAMPLE_RATE
-        });
-
-
-    const channel =
-        buffer.getChannelData(0);
-
-
-    let position = 0;
-
-    let phase = 0;
-
-
-    for (const symbol of symbols) {
-
-        const frequency =
-            FREQUENCIES[symbol];
-
-        const phaseStep =
-            2 *
-            Math.PI *
-            frequency /
-            SAMPLE_RATE;
-
-
-        const fadeSamples =
-            Math.min(
-                16,
-                Math.floor(
-                    samplesPerSymbol / 5
-                )
-            );
-
-
-        for (
-            let i = 0;
-            i < samplesPerSymbol;
-            i++
-        ) {
-
-            let envelope = 1;
-
-
-            if (
-                i <
-                fadeSamples
-            ) {
-
-                envelope =
-                    i /
-                    fadeSamples;
-
-            } else if (
-                i >
-                samplesPerSymbol -
-                fadeSamples
-            ) {
-
-                envelope =
-                    (
-                        samplesPerSymbol -
-                        i
-                    ) /
-                    fadeSamples;
-            }
-
-
-            channel[position++] =
-                Math.sin(phase) *
-                0.45 *
-                envelope;
-
-
-            phase +=
-                phaseStep;
-
-
-            if (
-                phase >
-                Math.PI * 2
-            ) {
-
-                phase -=
-                    Math.PI * 2;
-            }
-        }
-    }
-
-
-    return buffer;
-}
-
-
-/*
- * PLAY
- */
-
-playButton.onclick =
-    async () => {
-
-        if (!audioBuffer) {
-            return;
-        }
-
-        if (isPaused) {
-
-            await resumeTransmission();
-
-        } else {
-
-            await startTransmission();
-        }
-    };
-
-
-async function startTransmission() {
-
-    stopAudioOnly();
-
-
-    audioContext =
-        new AudioContext({
-            sampleRate: SAMPLE_RATE
-        });
-
-
-    await audioContext.resume();
-
-
-    sourceNode =
-        audioContext.createBufferSource();
-
-
-    sourceNode.buffer =
-        audioBuffer;
-
-
-    sourceNode.connect(
-        audioContext.destination
-    );
-
-
-    sourceNode.onended =
-        () => {
-
-            if (isPlaying) {
-                finishTransmission();
-            }
-        };
-
-
-    sourceNode.start();
-
-
-    transmissionStart =
-        audioContext.currentTime;
-
-
-    pausedAt = 0;
-
-    isPlaying = true;
-    isPaused = false;
-
-
-    statusElement.textContent =
-        "TRANSMITTING";
-
-
-    playButton.disabled = true;
-    pauseButton.disabled = false;
-    stopButton.disabled = false;
-
-
-    log(
-        "Transmission started."
-    );
-
-
-    updateTimer();
-}
-
-
-/*
- * PAUSE
- */
-
-pauseButton.onclick =
-    async () => {
-
-        if (
-            !audioContext ||
-            !isPlaying
-        ) {
-            return;
-        }
-
-
-        pausedAt =
-            audioContext.currentTime -
-            transmissionStart;
-
-
-        await audioContext.suspend();
-
-
-        isPlaying = false;
-        isPaused = true;
+        receiveStartTime =
+            performance.now();
 
 
         statusElement.textContent =
-            "PAUSED";
+            "LISTENING";
 
 
-        playButton.textContent =
-            "RESUME";
+        startButton.disabled = true;
 
-
-        playButton.disabled = false;
-        pauseButton.disabled = true;
+        stopButton.disabled = false;
 
 
         log(
-            "Transmission paused."
+            `Microphone active.`
         );
-    };
+
+        log(
+            `Actual sample rate: ${audioContext.sampleRate} Hz`
+        );
+
+        log(
+            "Searching for SONICCRYPT synchronization..."
+        );
 
 
-/*
- * RESUME
- */
+    } catch (error) {
 
-async function resumeTransmission() {
-
-    await audioContext.resume();
+        console.error(error);
 
 
-    transmissionStart =
-        audioContext.currentTime -
-        pausedAt;
+        statusElement.textContent =
+            "MICROPHONE ERROR";
 
 
-    isPlaying = true;
-    isPaused = false;
-
-
-    statusElement.textContent =
-        "TRANSMITTING";
-
-
-    playButton.textContent =
-        "PAUSE";
-
-
-    playButton.disabled = true;
-    pauseButton.disabled = false;
-
-
-    log(
-        "Transmission resumed."
-    );
-
-
-    updateTimer();
+        log(
+            "Microphone error: " +
+            error.message
+        );
+    }
 }
 
 
@@ -914,87 +321,52 @@ async function resumeTransmission() {
  */
 
 stopButton.onclick =
-    () => {
-
-        stopTransmission();
-    };
+    stopListening;
 
 
-function stopTransmission() {
+function stopListening() {
 
-    stopAudioOnly();
-
-
-    isPlaying = false;
-    isPaused = false;
-
-    pausedAt = 0;
+    listening = false;
 
 
-    cancelAnimationFrame(
-        animationFrame
-    );
+    if (processor) {
+
+        processor.disconnect();
+
+        processor.onaudioprocess =
+            null;
+
+        processor = null;
+    }
 
 
-    const duration =
-        audioBuffer
-            ? audioBuffer.duration
-            : 0;
+    if (microphone) {
+
+        microphone.disconnect();
+
+        microphone = null;
+    }
 
 
-    elapsedTime.textContent =
-        "00:00";
+    if (silentGain) {
+
+        silentGain.disconnect();
+
+        silentGain = null;
+    }
 
 
-    remainingTime.textContent =
-        formatTime(duration);
+    if (mediaStream) {
 
+        for (
+            const track of
+            mediaStream.getTracks()
+        ) {
 
-    progressFill.style.width =
-        "0%";
+            track.stop();
+        }
 
-    progressPercent.textContent =
-        "0%";
-
-
-    statusElement.textContent =
-        audioBuffer
-            ? "READY"
-            : "WAITING FOR FILE";
-
-
-    playButton.textContent =
-        "PLAY";
-
-
-    playButton.disabled =
-        !audioBuffer;
-
-    pauseButton.disabled = true;
-    stopButton.disabled = true;
-
-
-    log(
-        "Transmission stopped."
-    );
-}
-
-
-/*
- * STOP AUDIO
- */
-
-function stopAudioOnly() {
-
-    if (sourceNode) {
-
-        try {
-            sourceNode.stop();
-        } catch {}
-
-        sourceNode.disconnect();
-
-        sourceNode = null;
+        mediaStream = null;
     }
 
 
@@ -1003,6 +375,1160 @@ function stopAudioOnly() {
         audioContext.close();
 
         audioContext = null;
+    }
+
+
+    statusElement.textContent =
+        "MICROPHONE OFF";
+
+
+    startButton.disabled = false;
+
+    stopButton.disabled = true;
+
+
+    log(
+        "Receiver stopped."
+    );
+}
+
+
+/*
+ * AUDIO PROCESSING
+ */
+
+function processAudio(event) {
+
+    if (!listening) {
+        return;
+    }
+
+
+    const input =
+        event.inputBuffer
+            .getChannelData(0);
+
+
+    for (
+        let i = 0;
+        i < input.length;
+        i++
+    ) {
+
+        sampleBuffer.push(
+            input[i]
+        );
+    }
+
+
+    updateRawSignal(input);
+
+
+    /*
+     * We don't immediately chop the audio
+     * into symbols.
+     *
+     * First we find the synchronization
+     * sequence.
+     */
+
+    if (!synchronized) {
+
+        findSynchronization();
+
+        return;
+    }
+
+
+    /*
+     * Decode synchronized symbols.
+     */
+
+    while (
+        sampleBuffer.length >=
+        samplesPerSymbol
+    ) {
+
+        const samples =
+            sampleBuffer.splice(
+                0,
+                samplesPerSymbol
+            );
+
+
+        const result =
+            detectFrequency(
+                samples
+            );
+
+
+        if (!result) {
+            continue;
+        }
+
+
+        symbolBuffer.push(
+            result.symbol
+        );
+
+
+        frequencyElement.textContent =
+            `${result.frequency} Hz`;
+
+
+        updateSignal(
+            result.strength
+        );
+
+
+        decodeSymbol();
+    }
+}
+
+
+/*
+ * RAW SIGNAL
+ *
+ * This is what gives you the
+ * "100% signal" indicator.
+ */
+
+function updateRawSignal(samples) {
+
+    let sum = 0;
+
+    for (const sample of samples) {
+
+        sum +=
+            sample * sample;
+    }
+
+
+    const rms =
+        Math.sqrt(
+            sum /
+            samples.length
+        );
+
+
+    const percent =
+        Math.min(
+            100,
+            rms * 250
+        );
+
+
+    updateSignal(
+        percent
+    );
+}
+
+
+/*
+ * SYNCHRONIZATION
+ *
+ * Search the raw microphone data for:
+ *
+ * 0 F 0 F 0 F...
+ *
+ * This fixes the biggest problem
+ * with the previous receiver.
+ */
+
+function findSynchronization() {
+
+    if (!audioContext) {
+        return;
+    }
+
+
+    for (
+        const duration
+        of SYMBOL_DURATIONS
+    ) {
+
+        const sps =
+            Math.round(
+                audioContext.sampleRate *
+                duration
+            );
+
+
+        const required =
+            PREAMBLE.length *
+            sps;
+
+
+        if (
+            sampleBuffer.length <
+            required
+        ) {
+
+            continue;
+        }
+
+
+        /*
+         * Only search the most recent
+         * section so the array doesn't
+         * grow forever.
+         */
+
+        const searchLimit =
+            Math.min(
+                sampleBuffer.length -
+                required,
+                12000
+            );
+
+
+        /*
+         * Check possible starting
+         * positions.
+         */
+
+        for (
+            let start = 0;
+            start <= searchLimit;
+            start += 8
+        ) {
+
+            const score =
+                scorePreamble(
+                    start,
+                    sps
+                );
+
+
+            if (score >= 0.72) {
+
+                synchronized = true;
+
+                currentSymbolDuration =
+                    duration;
+
+                samplesPerSymbol =
+                    sps;
+
+
+                const consumed =
+                    start +
+                    required;
+
+
+                sampleBuffer =
+                    sampleBuffer.slice(
+                        consumed
+                    );
+
+
+                statusElement.textContent =
+                    "SYNCHRONIZED";
+
+
+                log(
+                    `SYNC LOCKED — ${Math.round(duration * 1000)} ms symbols`
+                );
+
+
+                log(
+                    `Symbol rate: ${Math.round(1 / duration)} symbols/sec`
+                );
+
+
+                return;
+            }
+        }
+    }
+
+
+    /*
+     * Prevent unlimited growth.
+     */
+
+    if (
+        sampleBuffer.length >
+        44100
+    ) {
+
+        sampleBuffer =
+            sampleBuffer.slice(
+                -22050
+            );
+    }
+}
+
+
+/*
+ * SCORE PREAMBLE
+ */
+
+function scorePreamble(
+    start,
+    sps
+) {
+
+    let totalScore = 0;
+
+
+    for (
+        let i = 0;
+        i < PREAMBLE.length;
+        i++
+    ) {
+
+        const offset =
+            start +
+            i * sps;
+
+
+        const samples =
+            sampleBuffer.slice(
+                offset,
+                offset + sps
+            );
+
+
+        const expected =
+            PREAMBLE[i];
+
+
+        const expectedFrequency =
+            FREQUENCIES[
+                expected
+            ];
+
+
+        const power =
+            goertzel(
+                samples,
+                expectedFrequency,
+                audioContext.sampleRate
+            );
+
+
+        let energy = 0;
+
+
+        for (
+            const sample
+            of samples
+        ) {
+
+            energy +=
+                sample * sample;
+        }
+
+
+        if (energy <= 0.0000001) {
+
+            return 0;
+        }
+
+
+        /*
+         * Normalize the frequency power.
+         */
+
+        const ratio =
+            power /
+            (
+                samples.length *
+                energy
+            );
+
+
+        /*
+         * Pure tone should produce
+         * a much stronger ratio than
+         * background noise.
+         */
+
+        const normalized =
+            Math.min(
+                1,
+                ratio * 2.0
+            );
+
+
+        totalScore +=
+            normalized;
+    }
+
+
+    return (
+        totalScore /
+        PREAMBLE.length
+    );
+}
+
+
+/*
+ * 16-FSK DETECTOR
+ */
+
+function detectFrequency(samples) {
+
+    let bestSymbol = 0;
+    let bestPower = -Infinity;
+
+
+    for (
+        let symbol = 0;
+        symbol < 16;
+        symbol++
+    ) {
+
+        const power =
+            goertzel(
+                samples,
+                FREQUENCIES[symbol],
+                audioContext.sampleRate
+            );
+
+
+        if (
+            power >
+            bestPower
+        ) {
+
+            bestPower =
+                power;
+
+            bestSymbol =
+                symbol;
+        }
+    }
+
+
+    let energy = 0;
+
+
+    for (
+        const sample
+        of samples
+    ) {
+
+        energy +=
+            sample * sample;
+    }
+
+
+    const ratio =
+        energy > 0
+            ? bestPower /
+              (
+                  samples.length *
+                  energy
+              )
+            : 0;
+
+
+    const strength =
+        Math.min(
+            100,
+            ratio * 200
+        );
+
+
+    return {
+
+        symbol: bestSymbol,
+
+        frequency:
+            FREQUENCIES[
+                bestSymbol
+            ],
+
+        strength
+    };
+}
+
+
+/*
+ * GOERTZEL
+ */
+
+function goertzel(
+    samples,
+    frequency,
+    sampleRate
+) {
+
+    const k =
+        Math.round(
+            0.5 +
+            (
+                samples.length *
+                frequency /
+                sampleRate
+            )
+        );
+
+
+    const omega =
+        2 *
+        Math.PI *
+        k /
+        samples.length;
+
+
+    const cosine =
+        Math.cos(omega);
+
+
+    const sine =
+        Math.sin(omega);
+
+
+    const coefficient =
+        2 * cosine;
+
+
+    let q0 = 0;
+    let q1 = 0;
+    let q2 = 0;
+
+
+    for (
+        const sample
+        of samples
+    ) {
+
+        q0 =
+            coefficient * q1 -
+            q2 +
+            sample;
+
+
+        q2 = q1;
+        q1 = q0;
+    }
+
+
+    const real =
+        q1 -
+        q2 * cosine;
+
+
+    const imag =
+        q2 * sine;
+
+
+    return (
+        real * real +
+        imag * imag
+    );
+}
+
+
+/*
+ * SIGNAL UI
+ */
+
+function updateSignal(value) {
+
+    const rounded =
+        Math.round(
+            Math.min(
+                100,
+                Math.max(
+                    0,
+                    value
+                )
+            )
+        );
+
+
+    signalStrength.textContent =
+        `${rounded}%`;
+
+
+    signalFill.style.width =
+        `${rounded}%`;
+}
+
+
+/*
+ * SYMBOL DECODER
+ */
+
+function decodeSymbol() {
+
+    symbolsReceived.textContent =
+        symbolBuffer.length
+            .toLocaleString();
+
+
+    /*
+     * First decode the header.
+     */
+
+    if (!headerParsed) {
+
+        tryParseHeader();
+
+        return;
+    }
+
+
+    /*
+     * Everything after the
+     * header is payload.
+     */
+
+    const symbol =
+        symbolBuffer.shift();
+
+
+    appendPayloadSymbol(
+        symbol
+    );
+}
+
+
+/*
+ * HEADER
+ */
+
+function tryParseHeader() {
+
+    /*
+     * Need at least:
+     *
+     * magic 4
+     * version 1
+     * name length 2
+     */
+
+    if (
+        symbolBuffer.length <
+        14
+    ) {
+
+        return;
+    }
+
+
+    const bytes =
+        symbolsToBytes(
+            symbolBuffer
+        );
+
+
+    if (
+        bytes[0] !== 0x53 ||
+        bytes[1] !== 0x43 ||
+        bytes[2] !== 0x58 ||
+        bytes[3] !== 0x32
+    ) {
+
+        /*
+         * We lost synchronization.
+         */
+
+        log(
+            "Header mismatch — searching again."
+        );
+
+
+        synchronized = false;
+
+        headerParsed = false;
+
+        symbolBuffer = [];
+
+        sampleBuffer = [];
+
+        return;
+    }
+
+
+    if (bytes[4] !== 2) {
+
+        log(
+            "Unsupported SONICCRYPT version."
+        );
+
+        return;
+    }
+
+
+    let position = 5;
+
+
+    if (
+        bytes.length <
+        position + 2
+    ) {
+
+        return;
+    }
+
+
+    const nameLength =
+        (
+            bytes[position] << 8
+        ) |
+        bytes[position + 1];
+
+
+    position += 2;
+
+
+    if (
+        bytes.length <
+        position +
+        nameLength +
+        2
+    ) {
+
+        return;
+    }
+
+
+    fileName =
+        new TextDecoder()
+            .decode(
+                new Uint8Array(
+                    bytes.slice(
+                        position,
+                        position +
+                        nameLength
+                    )
+                )
+            );
+
+
+    position +=
+        nameLength;
+
+
+    const mimeLength =
+        (
+            bytes[position] << 8
+        ) |
+        bytes[position + 1];
+
+
+    position += 2;
+
+
+    if (
+        bytes.length <
+        position +
+        mimeLength +
+        8
+    ) {
+
+        return;
+    }
+
+
+    mimeType =
+        new TextDecoder()
+            .decode(
+                new Uint8Array(
+                    bytes.slice(
+                        position,
+                        position +
+                        mimeLength
+                    )
+                )
+            );
+
+
+    position +=
+        mimeLength;
+
+
+    expectedFileSize =
+        (
+            bytes[position] *
+                0x1000000 +
+            bytes[position + 1] *
+                0x10000 +
+            bytes[position + 2] *
+                0x100 +
+            bytes[position + 3]
+        ) >>> 0;
+
+
+    position += 4;
+
+
+    expectedCRC =
+        (
+            bytes[position] *
+                0x1000000 +
+            bytes[position + 1] *
+                0x10000 +
+            bytes[position + 2] *
+                0x100 +
+            bytes[position + 3]
+        ) >>> 0;
+
+
+    /*
+     * Header is complete.
+     */
+
+    const headerByteCount =
+        position + 4;
+
+
+    const headerSymbolCount =
+        headerByteCount * 2;
+
+
+    if (
+        symbolBuffer.length <
+        headerSymbolCount
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Remove header.
+     */
+
+    symbolBuffer =
+        symbolBuffer.slice(
+            headerSymbolCount
+        );
+
+
+    headerParsed = true;
+
+
+    fileNameElement.textContent =
+        fileName;
+
+
+    expectedBytesElement.textContent =
+        formatBytes(
+            expectedFileSize
+        );
+
+
+    previewStatus.textContent =
+        "RECEIVING...";
+
+
+    log(
+        `Transmission detected: ${fileName}`
+    );
+
+
+    log(
+        `Expected size: ${formatBytes(
+            expectedFileSize
+        )}`
+    );
+
+
+    log(
+        `MIME: ${mimeType}`
+    );
+
+
+    log(
+        `CRC32: ${expectedCRC
+            .toString(16)
+            .padStart(8, "0")}`
+    );
+
+
+    /*
+     * Decode anything that arrived
+     * after the header.
+     */
+
+    while (
+        symbolBuffer.length > 0
+    ) {
+
+        const symbol =
+            symbolBuffer.shift();
+
+        appendPayloadSymbol(
+            symbol
+        );
+    }
+}
+
+
+/*
+ * APPEND PAYLOAD SYMBOL
+ */
+
+function appendPayloadSymbol(
+    symbol
+) {
+
+    payloadBitBuffer.push(
+        (symbol >> 3) & 1,
+        (symbol >> 2) & 1,
+        (symbol >> 1) & 1,
+        symbol & 1
+    );
+
+
+    /*
+     * Every original byte is:
+     *
+     * 5 random bits
+     * 8 real bits
+     *
+     * = 13 bits
+     */
+
+    while (
+        payloadBitBuffer.length >=
+        13
+    ) {
+
+        /*
+         * Skip random bits.
+         */
+
+        payloadBitBuffer.splice(
+            0,
+            5
+        );
+
+
+        let value = 0;
+
+
+        for (
+            let i = 0;
+            i < 8;
+            i++
+        ) {
+
+            value =
+                (
+                    value << 1
+                ) |
+                payloadBitBuffer[i];
+        }
+
+
+        /*
+         * Remove the 8 data bits.
+         */
+
+        payloadBitBuffer.splice(
+            0,
+            8
+        );
+
+
+        receivedBytes.push(
+            value
+        );
+
+
+        if (
+            receivedBytes.length >=
+            expectedFileSize
+        ) {
+
+            finishReception();
+
+            return;
+        }
+    }
+
+
+    updateReceiveProgress();
+
+    updateLivePreview();
+}
+
+
+/*
+ * PROGRESS
+ */
+
+function updateReceiveProgress() {
+
+    const now =
+        performance.now();
+
+
+    if (
+        now -
+        lastProgressUpdate <
+        100
+    ) {
+
+        return;
+    }
+
+
+    lastProgressUpdate =
+        now;
+
+
+    if (
+        expectedFileSize <= 0
+    ) {
+
+        return;
+    }
+
+
+    const count =
+        Math.min(
+            receivedBytes.length,
+            expectedFileSize
+        );
+
+
+    const percent =
+        (
+            count /
+            expectedFileSize
+        ) * 100;
+
+
+    receiveFill.style.width =
+        `${percent}%`;
+
+
+    receivePercent.textContent =
+        `${percent.toFixed(1)}%`;
+
+
+    receivedBytesElement.textContent =
+        formatBytes(count);
+
+
+    receivedText.textContent =
+        `${formatBytes(count)} / ${formatBytes(
+            expectedFileSize
+        )}`;
+
+
+    const elapsed =
+        (
+            now -
+            receiveStartTime
+        ) / 1000;
+
+
+    const speed =
+        elapsed > 0
+            ? count / elapsed
+            : 0;
+
+
+    receiveSpeed.textContent =
+        `${formatBytes(speed)}/s`;
+}
+
+
+/*
+ * LIVE PREVIEW
+ */
+
+function updateLivePreview() {
+
+    const now =
+        performance.now();
+
+
+    if (
+        now -
+        lastPreviewUpdate <
+        1000
+    ) {
+
+        return;
+    }
+
+
+    lastPreviewUpdate =
+        now;
+
+
+    if (
+        !mimeType.startsWith(
+            "image/"
+        )
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Browsers generally need a
+     * valid image before displaying it.
+     *
+     * We still attempt a live preview.
+     */
+
+    try {
+
+        const blob =
+            new Blob(
+                [
+                    new Uint8Array(
+                        receivedBytes
+                    )
+                ],
+                {
+                    type: mimeType
+                }
+            );
+
+
+        const url =
+            URL.createObjectURL(
+                blob
+            );
+
+
+        const testImage =
+            new Image();
+
+
+        testImage.onload =
+            () => {
+
+                receivedImage.src =
+                    url;
+
+                receivedImage.style.display =
+                    "block";
+
+                previewStatus.textContent =
+                    "LIVE IMAGE PREVIEW";
+            };
+
+
+        testImage.onerror =
+            () => {
+
+                URL.revokeObjectURL(
+                    url
+                );
+            };
+
+
+        testImage.src =
+            url;
+
+    } catch {
+
+        /*
+         * Continue receiving.
+         */
     }
 }
 
@@ -1011,41 +1537,59 @@ function stopAudioOnly() {
  * FINISH
  */
 
-function finishTransmission() {
+function finishReception() {
 
-    isPlaying = false;
-    isPaused = false;
+    const data =
+        new Uint8Array(
+            receivedBytes
+        );
 
 
-    cancelAnimationFrame(
-        animationFrame
-    );
+    const actualCRC =
+        crc32(data);
+
+
+    updateReceiveProgress();
+
+
+    if (
+        actualCRC !==
+        expectedCRC
+    ) {
+
+        statusElement.textContent =
+            "CHECKSUM ERROR";
+
+
+        previewStatus.textContent =
+            "Transmission finished, but the checksum failed.";
+
+
+        log(
+            `CRC ERROR — expected ${expectedCRC
+                .toString(16)}, received ${actualCRC
+                .toString(16)}`
+        );
+
+
+        return;
+    }
 
 
     statusElement.textContent =
         "TRANSMISSION COMPLETE";
 
 
-    playButton.disabled = false;
-    pauseButton.disabled = true;
-    stopButton.disabled = true;
-
-
-    progressFill.style.width =
-        "100%";
-
-    progressPercent.textContent =
+    receiveFill.style.width =
         "100%";
 
 
-    elapsedTime.textContent =
-        formatTime(
-            audioBuffer.duration
-        );
+    receivePercent.textContent =
+        "100%";
 
 
-    remainingTime.textContent =
-        "00:00";
+    previewStatus.textContent =
+        "FILE RECEIVED SUCCESSFULLY";
 
 
     log(
@@ -1053,162 +1597,166 @@ function finishTransmission() {
     );
 
 
-    if (audioContext) {
-
-        audioContext.close();
-
-        audioContext = null;
-    }
-
-
-    sourceNode = null;
-}
-
-
-/*
- * TIMER
- */
-
-function updateTimer() {
-
-    if (
-        !isPlaying ||
-        !audioContext
-    ) {
-        return;
-    }
-
-
-    const elapsed =
-        audioContext.currentTime -
-        transmissionStart;
-
-
-    const total =
-        audioBuffer.duration;
-
-
-    const progress =
-        Math.min(
-            1,
-            elapsed / total
-        );
-
-
-    elapsedTime.textContent =
-        formatTime(elapsed);
-
-
-    remainingTime.textContent =
-        formatTime(
-            Math.max(
-                0,
-                total - elapsed
-            )
-        );
-
-
-    progressFill.style.width =
-        `${progress * 100}%`;
-
-
-    progressPercent.textContent =
-        `${Math.floor(
-            progress * 100
-        )}%`;
-
-
-    animationFrame =
-        requestAnimationFrame(
-            updateTimer
-        );
-}
-
-
-/*
- * WAVEFORM
- */
-
-function drawWaveform(buffer) {
-
-    canvas.width =
-        canvas.clientWidth *
-        window.devicePixelRatio;
-
-    canvas.height =
-        canvas.clientHeight *
-        window.devicePixelRatio;
-
-
-    ctx.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
+    log(
+        "CRC32 verified successfully."
     );
 
 
-    const data =
-        buffer.getChannelData(0);
-
-
-    const center =
-        canvas.height / 2;
-
-
-    const step =
-        Math.max(
-            1,
-            Math.floor(
-                data.length /
-                canvas.width
-            )
+    const blob =
+        new Blob(
+            [data],
+            {
+                type:
+                    mimeType ||
+                    "application/octet-stream"
+            }
         );
 
 
-    ctx.beginPath();
+    const url =
+        URL.createObjectURL(
+            blob
+        );
 
 
-    for (
-        let x = 0;
-        x < canvas.width;
-        x++
+    if (
+        mimeType.startsWith(
+            "image/"
+        )
     ) {
 
-        const value =
-            data[x * step] || 0;
+        receivedImage.src =
+            url;
 
-
-        const y =
-            center +
-            value *
-            center *
-            0.85;
-
-
-        if (x === 0) {
-
-            ctx.moveTo(
-                x,
-                y
-            );
-
-        } else {
-
-            ctx.lineTo(
-                x,
-                y
-            );
-        }
+        receivedImage.style.display =
+            "block";
     }
 
 
-    ctx.strokeStyle =
-        "#4aa8ff";
+    downloadButton.href =
+        url;
 
-    ctx.lineWidth = 1;
 
-    ctx.stroke();
+    downloadButton.download =
+        fileName ||
+        "soniccrypt-file";
+
+
+    downloadButton.style.display =
+        "block";
+}
+
+
+/*
+ * RESET
+ */
+
+function resetDecoder() {
+
+    symbolBuffer = [];
+
+    headerParsed = false;
+
+    synchronized = false;
+
+    currentSymbolDuration =
+        0.004;
+
+    samplesPerSymbol = 0;
+
+    expectedFileSize = 0;
+
+    expectedCRC = 0;
+
+    fileName = "";
+
+    mimeType = "";
+
+    payloadBitBuffer = [];
+
+    receivedBytes = [];
+
+    sampleBuffer = [];
+
+    lastPreviewUpdate = 0;
+
+    lastProgressUpdate = 0;
+
+
+    fileNameElement.textContent =
+        "Searching for SONICCRYPT...";
+
+
+    receivedBytesElement.textContent =
+        "0 B";
+
+
+    expectedBytesElement.textContent =
+        "0 B";
+
+
+    receiveSpeed.textContent =
+        "0 B/s";
+
+
+    receivedText.textContent =
+        "0 B / 0 B";
+
+
+    receivePercent.textContent =
+        "0%";
+
+
+    receiveFill.style.width =
+        "0%";
+
+
+    receivedImage.style.display =
+        "none";
+
+
+    receivedImage.removeAttribute(
+        "src"
+    );
+
+
+    downloadButton.style.display =
+        "none";
+
+
+    previewStatus.textContent =
+        "Waiting for transmission...";
+}
+
+
+/*
+ * SYMBOLS -> BYTES
+ */
+
+function symbolsToBytes(
+    symbols
+) {
+
+    const bytes = [];
+
+
+    for (
+        let i = 0;
+        i + 1 <
+        symbols.length;
+        i += 2
+    ) {
+
+        bytes.push(
+            (
+                symbols[i] << 4
+            ) |
+            symbols[i + 1]
+        );
+    }
+
+
+    return bytes;
 }
 
 
@@ -1222,7 +1770,10 @@ function crc32(bytes) {
         0xffffffff;
 
 
-    for (const byte of bytes) {
+    for (
+        const byte
+        of bytes
+    ) {
 
         crc ^= byte;
 
@@ -1234,9 +1785,13 @@ function crc32(bytes) {
         ) {
 
             crc =
-                (crc >>> 1) ^
                 (
-                    -(crc & 1) &
+                    crc >>> 1
+                ) ^
+                (
+                    -(
+                        crc & 1
+                    ) &
                     0xedb88320
                 );
         }
@@ -1251,61 +1806,7 @@ function crc32(bytes) {
 
 
 /*
- * FORMAT TIME
- */
-
-function formatTime(seconds) {
-
-    seconds =
-        Math.max(
-            0,
-            Math.floor(seconds)
-        );
-
-
-    const hours =
-        Math.floor(
-            seconds / 3600
-        );
-
-
-    const minutes =
-        Math.floor(
-            (seconds % 3600) / 60
-        );
-
-
-    const secs =
-        seconds % 60;
-
-
-    if (hours > 0) {
-
-        return (
-            String(hours)
-                .padStart(2, "0") +
-            ":" +
-            String(minutes)
-                .padStart(2, "0") +
-            ":" +
-            String(secs)
-                .padStart(2, "0")
-        );
-    }
-
-
-    return (
-        String(minutes)
-            .padStart(2, "0") +
-        ":" +
-        String(secs)
-            .padStart(2, "0")
-    );
-}
-
-
-/*
- * FORMAT BYTES
+ * FORMAT
  */
 
 function formatBytes(bytes) {
@@ -1353,24 +1854,25 @@ function formatBytes(bytes) {
  * INITIAL
  */
 
-playButton.disabled = true;
-pauseButton.disabled = true;
 stopButton.disabled = true;
 
 
-turboButton.classList.add(
-    "active"
-);
-
-
 log(
-    "SONICCRYPT TURBO transmitter initialized."
+    "SONICCRYPT receiver initialized."
 );
 
 log(
-    "16-FSK: 1000-4000 Hz."
+    "16-FSK decoder ready."
 );
 
 log(
-    "Synchronization preamble enabled."
+    "1000-4000 Hz."
+);
+
+log(
+    "Synchronization search enabled."
+);
+
+log(
+    "Waiting for transmission..."
 );
